@@ -119,6 +119,34 @@ public class ParquetUtils extends FileFormatUtils {
   }
 
   /**
+   * Read the schema from a parquet file.
+   *
+   * @param storage        {@link HoodieStorage} instance.
+   * @param parquetFilePath The parquet file path.
+   * @return MessageType representing the parquet schema
+   */
+  public static MessageType readSchema(HoodieStorage storage, StoragePath parquetFilePath) {
+    ParquetMetadata metadata = readMetadata(storage, parquetFilePath);
+    return metadata.getFileMetaData().getSchema();
+  }
+
+  /**
+   * Read the schema hash from a parquet file. This is useful for comparing schemas
+   * without holding the entire schema in memory.
+   *
+   * @param storage        {@link HoodieStorage} instance.
+   * @param parquetFilePath The parquet file path.
+   * @return Hash code of the schema for efficient comparison
+   * @throws HoodieIOException if schema reading fails
+   */
+  public static int readSchemaHash(HoodieStorage storage, StoragePath parquetFilePath) {
+    MessageType schema = readSchema(storage, parquetFilePath);
+    // Use the string representation of the schema to compute hash
+    // This ensures consistent hashing for the same schema structure
+    return schema.toString().hashCode();
+  }
+
+  /**
    * Read the rowKey list matching the given filter, from the given parquet file. If the filter is empty, then this will
    * return all the rowkeys.
    *
@@ -231,13 +259,6 @@ public class ParquetUtils extends FileFormatUtils {
   public ClosableIterator<Pair<HoodieKey, Long>> fetchRecordKeysWithPositions(HoodieStorage storage, StoragePath filePath, Option<BaseKeyGenerator> keyGeneratorOpt, Option<String> partitionPath) {
     AtomicLong position = new AtomicLong(0);
     return new CloseableMappingIterator<>(getHoodieKeyIterator(storage, filePath, keyGeneratorOpt, partitionPath), key -> Pair.of(key, position.getAndIncrement()));
-  }
-
-  /**
-   * Get the schema of the given parquet file.
-   */
-  public MessageType readSchema(HoodieStorage storage, StoragePath parquetFilePath) {
-    return readMetadata(storage, parquetFilePath).getFileMetaData().getSchema();
   }
 
   @Override

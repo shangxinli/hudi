@@ -58,7 +58,7 @@ public abstract class ClusteringPlanStrategy<T,I,K,O> implements Serializable {
 
   protected final HoodieTable<T,I,K,O> hoodieTable;
   private final transient HoodieEngineContext engineContext;
-  private final HoodieWriteConfig writeConfig;
+  protected final HoodieWriteConfig writeConfig;
 
   /**
    * Check if the given class is deprecated.
