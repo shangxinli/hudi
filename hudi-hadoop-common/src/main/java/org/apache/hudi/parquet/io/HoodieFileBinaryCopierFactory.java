@@ -61,7 +61,7 @@ public class HoodieFileBinaryCopierFactory {
       }
       
       // Check if it's the custom implementation
-      if (copierClassName.equals("org.apache.hudi.parquet.io.LiteCustomFileBinaryCopier")) {
+      if (copierClassName.equals("org.apache.hudi.parquet.io.LiteFileBinaryCopier")) {
         return (HoodieFileBinaryCopier) ReflectionUtils.loadClass(
             copierClassName,
             new Class<?>[] {},
