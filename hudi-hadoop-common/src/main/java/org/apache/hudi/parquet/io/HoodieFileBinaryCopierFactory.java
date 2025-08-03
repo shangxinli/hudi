@@ -18,9 +18,7 @@
 
 package org.apache.hudi.parquet.io;
 
-import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.util.ReflectionUtils;
-import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.io.storage.HoodieFileBinaryCopier;
 import org.apache.hudi.util.HoodieFileMetadataMerger;
 
@@ -39,19 +37,18 @@ public class HoodieFileBinaryCopierFactory {
   /**
    * Creates a HoodieFileBinaryCopier instance based on the configuration.
    *
-   * @param config Hudi write configuration
+   * @param copierClassName Fully qualified class name of the copier
    * @param conf Hadoop configuration
    * @param codecName Compression codec name
    * @param fileMetadataMerger File metadata merger
    * @return HoodieFileBinaryCopier instance
    */
   public static HoodieFileBinaryCopier createBinaryCopier(
-      HoodieWriteConfig config,
+      String copierClassName,
       Configuration conf,
       CompressionCodecName codecName,
       HoodieFileMetadataMerger fileMetadataMerger) {
     
-    String copierClassName = config.getStringOrDefault(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS);
     LOG.info("Creating file binary copier with class: {}", copierClassName);
 
     try {

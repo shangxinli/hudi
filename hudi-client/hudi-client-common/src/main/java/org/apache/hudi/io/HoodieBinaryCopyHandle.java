@@ -30,7 +30,6 @@ import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.util.HoodieFileMetadataMerger;
 import org.apache.hudi.io.storage.HoodieFileBinaryCopier;
 import org.apache.hudi.parquet.io.HoodieFileBinaryCopierFactory;
-import org.apache.hudi.parquet.io.HoodieParquetFileBinaryCopier;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 
@@ -81,8 +80,9 @@ public class HoodieBinaryCopyHandle<T, I, K, O> extends HoodieWriteHandle<T, I, 
     writeStatus.setFileId(fileId);
     writeStatus.setPartitionPath(partitionPath);
     writeStatus.setStat(new HoodieWriteStat());
+    String copierClassName = config.getStringOrDefault(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS);
     this.writer = HoodieFileBinaryCopierFactory.createBinaryCopier(
-        config,
+        copierClassName,
         conf,
         CompressionCodecName.fromConf(config.getStringOrDefault(HoodieStorageConfig.PARQUET_COMPRESSION_CODEC_NAME)),
         fileMetadataMerger);

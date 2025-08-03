@@ -261,13 +261,6 @@ public class ParquetUtils extends FileFormatUtils {
     return new CloseableMappingIterator<>(getHoodieKeyIterator(storage, filePath, keyGeneratorOpt, partitionPath), key -> Pair.of(key, position.getAndIncrement()));
   }
 
-  /**
-   * Get the schema of the given parquet file.
-   */
-  public MessageType readSchema(HoodieStorage storage, StoragePath parquetFilePath) {
-    return readMetadata(storage, parquetFilePath).getFileMetaData().getSchema();
-  }
-
   @Override
   public Map<String, String> readFooter(HoodieStorage storage, boolean required,
                                         StoragePath filePath, String... footerNames) {
