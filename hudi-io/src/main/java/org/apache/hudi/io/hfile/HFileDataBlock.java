@@ -217,7 +217,7 @@ public class HFileDataBlock extends HFileBlock {
       // Copy to output stream.
       baos.write(dataBuf.array(), 0, dataBuf.position());
       // Clear the buffer.
-      dataBuf.clear();
+      ((java.nio.Buffer) dataBuf).clear();
     }
     return ByteBuffer.wrap(baos.toByteArray());
   }
