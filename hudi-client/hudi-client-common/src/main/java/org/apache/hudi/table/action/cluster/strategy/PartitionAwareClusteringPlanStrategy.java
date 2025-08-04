@@ -294,7 +294,7 @@ public abstract class PartitionAwareClusteringPlanStrategy<T,I,K,O> extends Clus
    * 
    * @return true if LiteFileBinaryCopier is enabled, false otherwise
    */
-  private boolean isLiteFileBinaryCopierEnabled() {
+  protected boolean isLiteFileBinaryCopierEnabled() {
     String copierClassName = writeConfig.getStringOrDefault(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS);
     return "org.apache.hudi.parquet.io.LiteFileBinaryCopier".equals(copierClassName);
   }
