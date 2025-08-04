@@ -21,14 +21,18 @@ package org.apache.hudi.parquet;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.parquet.format.converter.ParquetMetadataConverter;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetFileWriter;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.hadoop.util.HadoopInputFile;
 import org.apache.parquet.schema.MessageType;
+
+import org.apache.hudi.util.HoodieFileMetadataMerger;
 
 /**
  * Utility class for performing strict schema validation and merging of Parquet files.
@@ -66,8 +70,34 @@ public class HoodieParquetStrictMerge {
       writer.appendFile(HadoopInputFile.fromPath(input, conf));
     }
 
-    //TODO: If there is bloomfilter, we need to merge it using union instead of just adding them together
-    writer.end(ParquetFileWriter.mergeMetadataFiles(inputFiles, conf).getFileMetaData().getKeyValueMetaData());
+    // Merge metadata including bloom filters using proper union operation
+    Map<String, String> mergedMetadata = mergeFileMetadata(inputFiles);
+    writer.end(mergedMetadata);
+  }
+
+  /**
+   * Merges metadata from all input files, properly handling bloom filter union operations.
+   * This method extracts metadata from each input file and uses HoodieFileMetadataMerger
+   * to perform proper bloom filter merging using union operation instead of concatenation.
+   *
+   * @param inputFiles List of input Parquet file paths to merge metadata from
+   * @return Merged metadata map containing properly merged bloom filters
+   * @throws IOException if I/O error occurs while reading file metadata
+   */
+  private Map<String, String> mergeFileMetadata(List<Path> inputFiles) throws IOException {
+    HoodieFileMetadataMerger metadataMerger = new HoodieFileMetadataMerger();
+    
+    for (Path inputFile : inputFiles) {
+      ParquetMetadata metadata = ParquetFileReader.readFooter(conf, inputFile, 
+          ParquetMetadataConverter.NO_FILTER);
+      Map<String, String> fileMetadata = metadata.getFileMetaData().getKeyValueMetaData();
+      
+      if (fileMetadata != null && !fileMetadata.isEmpty()) {
+        metadataMerger.mergeMetaData(fileMetadata);
+      }
+    }
+    
+    return metadataMerger.getMergedMetaData();
   }
 
   /**
