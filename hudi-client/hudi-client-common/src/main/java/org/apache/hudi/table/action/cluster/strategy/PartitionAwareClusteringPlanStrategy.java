@@ -267,11 +267,17 @@ public abstract class PartitionAwareClusteringPlanStrategy<T,I,K,O> extends Clus
   private Integer getFileSchemaHash(FileSlice fileSlice) {
     if (fileSlice.getBaseFile().isPresent()) {
       String filePath = fileSlice.getBaseFile().get().getPath();
-      // Use centralized ParquetUtils method to read schema hash
-      return ParquetUtils.readSchemaHash(
-          getHoodieTable().getStorage(), 
-          new StoragePath(filePath)
-      );
+      try {
+        // Use centralized ParquetUtils method to read schema hash
+        return ParquetUtils.readSchemaHash(
+            getHoodieTable().getStorage(), 
+            new StoragePath(filePath)
+        );
+      } catch (Exception e) {
+        LOG.warn("Failed to read schema hash from file: " + filePath + ", treating as default schema", e);
+        // Return default hash when schema reading fails
+        return 0;
+      }
     }
     // Return default hash for files without base file
     return 0;
