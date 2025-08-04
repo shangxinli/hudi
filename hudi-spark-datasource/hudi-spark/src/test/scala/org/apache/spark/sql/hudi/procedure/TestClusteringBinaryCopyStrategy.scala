@@ -105,7 +105,7 @@ class TestClusteringBinaryCopyStrategy extends HoodieSparkProcedureTestBase {
                |    org.apache.hudi.client.clustering.run.strategy.SparkBinaryCopyClusteringExecutionStrategy'
                |)
                |""".stripMargin)(
-            Seq(firstScheduleInstant, 3, HoodieInstant.State.COMPLETED.name(), "*")
+            Seq(firstScheduleInstant, 5, HoodieInstant.State.COMPLETED.name(), "*")
           )
 
           checkAnswer(
