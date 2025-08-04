@@ -21,6 +21,7 @@ package org.apache.hudi.table.action.cluster.strategy;
 import org.apache.hudi.avro.model.HoodieClusteringGroup;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.avro.model.HoodieClusteringStrategy;
+import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.TableServiceType;
@@ -78,18 +79,21 @@ public abstract class PartitionAwareClusteringPlanStrategy<T,I,K,O> extends Clus
 
     long totalSizeSoFar = 0;
     boolean partialScheduled = false;
+    
+    // Only group by schema if LiteFileBinaryCopier is enabled
+    boolean enableSchemaGrouping = isLiteFileBinaryCopierEnabled();
     Integer currentGroupSchemaHash = null; // Track schema hash for current group
 
     for (FileSlice currentSlice : sortedFileSlices) {
       long currentSize = currentSlice.getBaseFile().isPresent() ? currentSlice.getBaseFile().get().getFileSize() : writeConfig.getParquetMaxFileSize();
       
-      // Get schema hash from the file
-      Integer currentFileSchemaHash = getFileSchemaHash(currentSlice);
+      // Get schema hash from the file only if schema grouping is enabled
+      Integer currentFileSchemaHash = enableSchemaGrouping ? getFileSchemaHash(currentSlice) : 0;
       
-      // Check if we need to create a new group due to schema mismatch
-      boolean schemaMismatch = currentGroupSchemaHash != null && !currentGroupSchemaHash.equals(currentFileSchemaHash);
+      // Check if we need to create a new group due to schema mismatch (only if schema grouping is enabled)
+      boolean schemaMismatch = enableSchemaGrouping && currentGroupSchemaHash != null && !currentGroupSchemaHash.equals(currentFileSchemaHash);
       
-      // check if max size is reached OR schema is different, and create new group if needed
+      // check if max size is reached OR (schema is different and schema grouping is enabled), and create new group if needed
       if ((totalSizeSoFar + currentSize > writeConfig.getClusteringMaxBytesInGroup() || schemaMismatch) && !currentGroup.isEmpty()) {
         int numOutputGroups = getNumberOfOutputFileGroups(totalSizeSoFar, writeConfig.getClusteringTargetFileMaxBytes());
         LOG.info("Adding one clustering group " + totalSizeSoFar + " max bytes: "
@@ -110,8 +114,8 @@ public abstract class PartitionAwareClusteringPlanStrategy<T,I,K,O> extends Clus
 
       // Add to the current file-group
       currentGroup.add(currentSlice);
-      // Set schema hash for the group if not set
-      if (currentGroupSchemaHash == null) {
+      // Set schema hash for the group if not set and schema grouping is enabled
+      if (enableSchemaGrouping && currentGroupSchemaHash == null) {
         currentGroupSchemaHash = currentFileSchemaHash;
       }
       // assume each file group size is ~= parquet.max.file.size
@@ -281,5 +285,17 @@ public abstract class PartitionAwareClusteringPlanStrategy<T,I,K,O> extends Clus
     }
     // Return default hash for files without base file
     return 0;
+  }
+
+  /**
+   * Checks if LiteFileBinaryCopier is configured as the binary copier.
+   * Schema-based grouping should only be enabled when LiteFileBinaryCopier is used
+   * since it can handle files with different schemas properly.
+   * 
+   * @return true if LiteFileBinaryCopier is enabled, false otherwise
+   */
+  private boolean isLiteFileBinaryCopierEnabled() {
+    String copierClassName = writeConfig.getStringOrDefault(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS);
+    return "org.apache.hudi.parquet.io.LiteFileBinaryCopier".equals(copierClassName);
   }
 }
