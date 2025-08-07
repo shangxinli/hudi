@@ -18,7 +18,6 @@
 
 package org.apache.hudi.table.action.cluster.strategy;
 
-import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -27,7 +26,6 @@ import org.apache.hudi.table.HoodieTable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +34,6 @@ import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class TestPartitionAwareClusteringPlanStrategy {
 
@@ -48,7 +45,6 @@ public class TestPartitionAwareClusteringPlanStrategy {
 
   @BeforeEach
   public void setUp() {
-    MockitoAnnotations.openMocks(this);
     Properties props = new Properties();
     props.setProperty("hoodie.clustering.plan.strategy.partition.regex.pattern", "2021072.*");
     this.hoodieWriteConfig = HoodieWriteConfig
@@ -79,83 +75,6 @@ public class TestPartitionAwareClusteringPlanStrategy {
     assertTrue(list.contains("20210723"));
   }
 
-  @Test
-  public void testIsLiteFileBinaryCopierEnabledWithDefaultCopier() {
-    // Test with default copier (should return false)
-    Properties props = new Properties();
-    HoodieWriteConfig config = HoodieWriteConfig
-        .newBuilder()
-        .withPath("dummy_Table_Path")
-        .withProperties(props)
-        .build();
-    
-    DummyPartitionAwareClusteringPlanStrategy strategy = 
-        new DummyPartitionAwareClusteringPlanStrategy(table, context, config);
-    
-    assertFalse(strategy.testIsLiteFileBinaryCopierEnabled(), 
-        "Should return false for default HoodieParquetFileBinaryCopier");
-  }
-
-  @Test
-  public void testIsLiteFileBinaryCopierEnabledWithLiteCopier() {
-    // Test with LiteFileBinaryCopier (should return true)
-    Properties props = new Properties();
-    props.setProperty(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS.key(), 
-        "org.apache.hudi.parquet.io.LiteFileBinaryCopier");
-    
-    HoodieWriteConfig config = HoodieWriteConfig
-        .newBuilder()
-        .withPath("dummy_Table_Path")
-        .withProperties(props)
-        .build();
-    
-    DummyPartitionAwareClusteringPlanStrategy strategy = 
-        new DummyPartitionAwareClusteringPlanStrategy(table, context, config);
-    
-    assertTrue(strategy.testIsLiteFileBinaryCopierEnabled(), 
-        "Should return true for LiteFileBinaryCopier");
-  }
-
-  @Test
-  public void testIsLiteFileBinaryCopierEnabledWithCustomCopier() {
-    // Test with custom copier (should return false)
-    Properties props = new Properties();
-    props.setProperty(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS.key(), 
-        "com.example.CustomFileBinaryCopier");
-    
-    HoodieWriteConfig config = HoodieWriteConfig
-        .newBuilder()
-        .withPath("dummy_Table_Path")
-        .withProperties(props)
-        .build();
-    
-    DummyPartitionAwareClusteringPlanStrategy strategy = 
-        new DummyPartitionAwareClusteringPlanStrategy(table, context, config);
-    
-    assertFalse(strategy.testIsLiteFileBinaryCopierEnabled(), 
-        "Should return false for custom copier");
-  }
-
-  @Test
-  public void testIsLiteFileBinaryCopierEnabledWithExplicitDefaultCopier() {
-    // Test with explicitly set default copier (should return false)
-    Properties props = new Properties();
-    props.setProperty(HoodieStorageConfig.HOODIE_FILE_BINARY_COPIER_CLASS.key(), 
-        "org.apache.hudi.parquet.io.HoodieParquetFileBinaryCopier");
-    
-    HoodieWriteConfig config = HoodieWriteConfig
-        .newBuilder()
-        .withPath("dummy_Table_Path")
-        .withProperties(props)
-        .build();
-    
-    DummyPartitionAwareClusteringPlanStrategy strategy = 
-        new DummyPartitionAwareClusteringPlanStrategy(table, context, config);
-    
-    assertFalse(strategy.testIsLiteFileBinaryCopierEnabled(), 
-        "Should return false for explicitly set default copier");
-  }
-
   class DummyPartitionAwareClusteringPlanStrategy extends PartitionAwareClusteringPlanStrategy {
 
     public DummyPartitionAwareClusteringPlanStrategy(HoodieTable table, HoodieEngineContext engineContext, HoodieWriteConfig writeConfig) {
@@ -165,11 +84,6 @@ public class TestPartitionAwareClusteringPlanStrategy {
     @Override
     protected Map<String, String> getStrategyParams() {
       return null;
-    }
-    
-    // Expose the private method for testing
-    public boolean testIsLiteFileBinaryCopierEnabled() {
-      return isLiteFileBinaryCopierEnabled();
     }
   }
 }

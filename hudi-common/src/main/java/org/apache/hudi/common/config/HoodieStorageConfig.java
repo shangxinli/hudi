@@ -270,14 +270,6 @@ public class HoodieStorageConfig extends HoodieConfig {
       .withDocumentation("The fully-qualified class name of the factory class to return readers and writers of files used "
           + "by Hudi. The provided class should implement `org.apache.hudi.io.storage.HoodieIOFactory`.");
 
-  public static final ConfigProperty<String> HOODIE_FILE_BINARY_COPIER_CLASS = ConfigProperty
-      .key("hoodie.file.binary.copier.class")
-      .defaultValue("org.apache.hudi.parquet.io.HoodieParquetFileBinaryCopier")
-      .markAdvanced()
-      .sinceVersion("1.1.0")
-      .withDocumentation("The fully-qualified class name of the HoodieFileBinaryCopier implementation class to use for "
-          + "binary copying files. The provided class should implement `org.apache.hudi.io.storage.HoodieFileBinaryCopier`.");
-
   /**
    * @deprecated Use {@link #PARQUET_MAX_FILE_SIZE} and its methods instead
    */
