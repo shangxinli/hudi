@@ -343,6 +343,15 @@ public class HoodieClusteringConfig extends HoodieConfig {
           + "Please exercise caution while setting this config, especially when clustering is done very frequently. This could lead to race condition in "
           + "rare scenarios, for example, when the clustering completes after instants are fetched but before rollback completed.");
 
+  public static final ConfigProperty<Boolean> FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE = ConfigProperty
+      .key("hoodie.file.stitching.binary.copy.schema.evolution.enable")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("0.16.0")
+      .withDocumentation("When enabled, file stitching binary copy operations will handle schema evolution by adding null columns "
+          + "when necessary. When disabled (default), files must have exactly the same schema to be grouped together, "
+          + "which can improve performance by avoiding schema compatibility checks and reduces the risk of schema errors.");
+
   /**
    * @deprecated Use {@link #PLAN_STRATEGY_CLASS_NAME} and its methods instead
    */
@@ -623,6 +632,11 @@ public class HoodieClusteringConfig extends HoodieConfig {
 
     public Builder withDataOptimizeBuildCurveSampleNumber(int sampleNumber) {
       clusteringConfig.setValue(LAYOUT_OPTIMIZE_BUILD_CURVE_SAMPLE_SIZE, String.valueOf(sampleNumber));
+      return this;
+    }
+
+    public Builder withFileStitchingBinaryCopySchemaEvolutionEnabled(Boolean enabled) {
+      clusteringConfig.setValue(FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE, String.valueOf(enabled));
       return this;
     }
 

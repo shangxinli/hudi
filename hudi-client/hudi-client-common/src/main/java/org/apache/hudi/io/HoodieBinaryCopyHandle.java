@@ -25,6 +25,7 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.IOType;
 import org.apache.hudi.common.util.HoodieTimer;
+import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.util.HoodieFileMetadataMerger;
@@ -65,7 +66,7 @@ public class HoodieBinaryCopyHandle<T, I, K, O> extends HoodieWriteHandle<T, I, 
   protected long insertRecordsWritten = 0;
 
   private MessageType getWriteSchema(HoodieWriteConfig config, List<StoragePath> inputFiles, Configuration conf, HoodieTable<?, ?, ?, ?> table) {
-    if (!config.isFileStitchingBinaryCopySchemaEvolutionEnabled() && !inputFiles.isEmpty()) {
+    if (!config.getBooleanOrDefault(HoodieClusteringConfig.FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE) && !inputFiles.isEmpty()) {
       // When schema evolution is disabled, use the schema from the first input file
       // All files should have the same schema in this case
       try {

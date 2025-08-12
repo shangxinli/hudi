@@ -29,6 +29,7 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ParquetUtils;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.IncrementalPartitionAwareStrategy;
@@ -80,7 +81,7 @@ public abstract class PartitionAwareClusteringPlanStrategy<T,I,K,O> extends Clus
     
     // Only group by schema if schema evolution is disabled
     // When schema evolution is disabled, files must have the same schema to be grouped together
-    boolean enableSchemaGrouping = !writeConfig.isFileStitchingBinaryCopySchemaEvolutionEnabled();
+    boolean enableSchemaGrouping = !writeConfig.getBooleanOrDefault(HoodieClusteringConfig.FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE);
     Integer currentGroupSchemaHash = null; // Track schema hash for current group
 
     for (FileSlice currentSlice : sortedFileSlices) {
