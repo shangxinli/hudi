@@ -98,10 +98,13 @@ public class TestPartitionAwareClusteringPlanStrategy {
 
   @Test
   public void testSchemaEvolutionDisabled_GroupsFilesBySchema() {
-    // Given: Schema evolution is disabled (default is false, so no need to set explicitly)
+    // Given: Schema evolution is disabled
+    Properties props = new Properties();
+    props.setProperty("hoodie.file.stitching.binary.copy.schema.evolution.enable", "false");
     HoodieWriteConfig configWithEvolutionDisabled = HoodieWriteConfig
         .newBuilder()
         .withPath("dummy_Table_Path")
+        .withProps(props)
         .build();
     
     when(table.getStorage()).thenReturn(storage);
@@ -147,7 +150,7 @@ public class TestPartitionAwareClusteringPlanStrategy {
 
   @Test
   public void testSchemaEvolutionEnabled_DoesNotGroupBySchema() {
-    // Given: Schema evolution is enabled (explicitly set to true since default is now false)
+    // Given: Schema evolution is enabled (default)
     Properties props = new Properties();
     props.setProperty("hoodie.file.stitching.binary.copy.schema.evolution.enable", "true");
     HoodieWriteConfig configWithEvolutionEnabled = HoodieWriteConfig
@@ -182,8 +185,9 @@ public class TestPartitionAwareClusteringPlanStrategy {
 
   @Test
   public void testSchemaEvolutionDisabled_LargeGroup_SplitsBySize() {
-    // Given: Schema evolution is disabled (default) but group size exceeds limit
+    // Given: Schema evolution is disabled but group size exceeds limit
     Properties props = new Properties();
+    props.setProperty("hoodie.file.stitching.binary.copy.schema.evolution.enable", "false");
     props.setProperty("hoodie.clustering.plan.strategy.max.bytes.per.group", "300"); // Small limit
     HoodieWriteConfig configWithEvolutionDisabled = HoodieWriteConfig
         .newBuilder()

@@ -201,8 +201,7 @@ class TestClusteringBinaryCopyStrategy extends HoodieSparkProcedureTestBase {
                |  table => '$tableName',
                |  order => 'ts',
                |  options => 'hoodie.clustering.execution.strategy.class=
-               |    org.apache.hudi.client.clustering.run.strategy.SparkBinaryCopyClusteringExecutionStrategy,
-               |    hoodie.file.stitching.binary.copy.schema.evolution.enable=true'
+               |    org.apache.hudi.client.clustering.run.strategy.SparkBinaryCopyClusteringExecutionStrategy'
                |)
                |""".stripMargin)(
             Seq(firstScheduleInstant, 3, HoodieInstant.State.COMPLETED.name(), "*")
@@ -285,8 +284,7 @@ class TestClusteringBinaryCopyStrategy extends HoodieSparkProcedureTestBase {
                |  table => '$tableName',
                |  order => 'ts',
                |  options => 'hoodie.clustering.execution.strategy.class=
-               |    org.apache.hudi.client.clustering.run.strategy.SparkBinaryCopyClusteringExecutionStrategy,
-               |    hoodie.file.stitching.binary.copy.schema.evolution.enable=true'
+               |    org.apache.hudi.client.clustering.run.strategy.SparkBinaryCopyClusteringExecutionStrategy'
                |)
                |""".stripMargin)(
             Seq(secondScheduleInstant, 1, HoodieInstant.State.COMPLETED.name(), "*")
