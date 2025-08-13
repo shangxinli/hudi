@@ -115,7 +115,8 @@ public class HoodieBinaryCopyHandle<T, I, K, O> extends HoodieWriteHandle<T, I, 
     HoodieTimer timer = HoodieTimer.start();
     long records = 0;
     try {
-      records = this.writer.binaryCopy(inputFiles, Collections.singletonList(path), writeScheMessageType, config.getProps());
+      boolean schemaEvolutionEnabled = config.isFileStitchingBinaryCopySchemaEvolutionEnabled();
+      records = this.writer.binaryCopy(inputFiles, Collections.singletonList(path), writeScheMessageType, schemaEvolutionEnabled);
     } catch (IOException e) {
       throw new HoodieIOException(e.getMessage(), e);
     } finally {

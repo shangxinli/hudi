@@ -122,7 +122,7 @@ public abstract class HoodieParquetBinaryCopyBase implements Closeable {
   protected Configuration conf;
   
   // Flag to control schema evolution behavior
-  protected boolean schemaEvolutionEnabled = true;
+  protected Boolean schemaEvolutionEnabled = null;
 
   public HoodieParquetBinaryCopyBase(Configuration conf) {
     this.conf = conf;
@@ -198,6 +198,10 @@ public abstract class HoodieParquetBinaryCopyBase implements Closeable {
 
       // resolve the conflict schema between avro parquet write support and spark native parquet write support
       // Only attempt legacy conversion if schema evolution is enabled
+      if (schemaEvolutionEnabled == null) {
+        throw new HoodieException("Schema Evolution enabled not set");
+      }
+
       if (descriptor == null && schemaEvolutionEnabled) {
         String[] path = chunk.getPath().toArray();
         path = Arrays.copyOf(path, path.length);

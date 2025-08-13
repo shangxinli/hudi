@@ -125,7 +125,7 @@ public class TestHoodieParquetFileBinaryCopier {
         .map(StoragePath::new)
         .collect(Collectors.toList());
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema, true);
     writer.close();
     verify(schema, CompressionCodecName.GZIP);
   }
@@ -143,7 +143,7 @@ public class TestHoodieParquetFileBinaryCopier {
         .map(StoragePath::new)
         .collect(Collectors.toList());
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema, true);
     writer.close();
     verify(schema, CompressionCodecName.ZSTD);
   }
@@ -171,7 +171,7 @@ public class TestHoodieParquetFileBinaryCopier {
         .map(StoragePath::new)
         .collect(Collectors.toList());
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema1, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema1, true);
     writer.close();
     verify(schema1, CompressionCodecName.UNCOMPRESSED);
   }
@@ -201,7 +201,7 @@ public class TestHoodieParquetFileBinaryCopier {
 
     writer = parquetFileBinaryCopier(requiredSchema, "GZIP");
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, true);
     writer.close();
 
     List<ColumnDescriptor> columns = inputSchema.getColumns();
@@ -271,7 +271,7 @@ public class TestHoodieParquetFileBinaryCopier {
 
     writer = parquetFileBinaryCopier(requiredSchema, "GZIP");
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, true);
     writer.close();
 
     List<ColumnDescriptor> columns = inputSchema.getColumns();
@@ -313,7 +313,7 @@ public class TestHoodieParquetFileBinaryCopier {
 
     writer = parquetFileBinaryCopier(requiredSchema, "GZIP");
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, true);
     writer.close();
 
     List<ColumnDescriptor> columns = inputSchema.getColumns();
@@ -388,7 +388,7 @@ public class TestHoodieParquetFileBinaryCopier {
 
     writer = parquetFileBinaryCopier(requiredSchema, "GZIP");
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), requiredSchema, true);
     writer.close();
     List<ColumnDescriptor> columns = inputSchema.getColumns();
     Assertions.assertEquals(5, columns.size());
@@ -420,7 +420,7 @@ public class TestHoodieParquetFileBinaryCopier {
         .map(StoragePath::new)
         .collect(Collectors.toList());
     StoragePath outputPath = new StoragePath(outputFile);
-    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema, new Properties());
+    writer.binaryCopy(inputPaths, Collections.singletonList(outputPath), schema, true);
     writer.close();
     verify(schema, CompressionCodecName.GZIP);
   }
