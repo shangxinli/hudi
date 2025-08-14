@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn clean:*)",
+      "Bash(find:*)",
+      "Bash(javac:*)",
+      "Bash(git add:*)",
+      "Bash(grep:*)",
+      "Bash(git commit:*)",
+      "Bash(./runHudiTest.sh:*)",
+      "Bash(export:*)",
+      "Bash(mvn compile:*)",
+      "Bash(mvn scalatest:test:*)",
+      "Bash(./build.sh)",
+      "Bash(mvn:*)",
+      "Bash(java:*)",
+      "Bash(SCALA_PROFILE=\"scala-2.12\")",
+      "Bash(FLINK_PROFILE=\"flink1.18\")",
+      "Bash(FLINK_AVRO_VERSION=\"1.11.1\")",
+      "Bash(FLINK_PARQUET_VERSION=\"1.12.3\")",
+      "Bash(MVN_ARGS=\"\")",
+      "Bash(echo \"SCALA_PROFILE=$SCALA_PROFILE\")",
+      "Bash(echo:*)",
+      "Bash(source:*)",
+      "Bash(cat:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(timeout:*)",
+      "Bash(git stash:*)",
+      "Bash(git restore:*)",
+      "Bash(chmod:*)",
+      "Bash(./runScalaTest.sh)"
+    ],
+    "deny": []
+  }
+}
