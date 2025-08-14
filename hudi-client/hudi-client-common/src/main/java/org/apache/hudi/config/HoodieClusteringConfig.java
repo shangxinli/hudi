@@ -345,7 +345,7 @@ public class HoodieClusteringConfig extends HoodieConfig {
 
   public static final ConfigProperty<Boolean> FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE = ConfigProperty
       .key("hoodie.file.stitching.binary.copy.schema.evolution.enable")
-      .defaultValue(true)
+      .defaultValue(false)
       .markAdvanced()
       .sinceVersion("1.1.0")
       .withDocumentation("Enable schema evolution support for binary file stitching during clustering. "

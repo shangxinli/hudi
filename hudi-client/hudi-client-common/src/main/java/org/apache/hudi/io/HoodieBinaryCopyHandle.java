@@ -116,6 +116,7 @@ public class HoodieBinaryCopyHandle<T, I, K, O> extends HoodieWriteHandle<T, I, 
     long records = 0;
     try {
       boolean schemaEvolutionEnabled = config.isFileStitchingBinaryCopySchemaEvolutionEnabled();
+      LOG.info("Schema evolution enabled for binary copy: {}", schemaEvolutionEnabled);
       records = this.writer.binaryCopy(inputFiles, Collections.singletonList(path), writeScheMessageType, schemaEvolutionEnabled);
     } catch (IOException e) {
       throw new HoodieIOException(e.getMessage(), e);
