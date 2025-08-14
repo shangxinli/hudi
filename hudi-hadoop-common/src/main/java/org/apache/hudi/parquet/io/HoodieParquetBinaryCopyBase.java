@@ -525,6 +525,12 @@ public abstract class HoodieParquetBinaryCopyBase implements Closeable {
       CompressionCodecName newCodecName,
       Binary maskValue) throws IOException {
 
+    // Check if schema evolution is enabled before proceeding with column masking
+    if (schemaEvolutionEnabled == null || !schemaEvolutionEnabled) {
+      throw new HoodieException("Column masking operation is not supported when schema evolution is disabled. "
+          + "Set 'hoodie.file.stitching.binary.copy.schema.evolution.enable' to true to enable schema evolution support.");
+    }
+
     long totalChunkValues = chunk.getValueCount();
     ColumnReader cReader = crStore.getColumnReader(descriptor);
 

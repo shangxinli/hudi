@@ -33,12 +33,12 @@ public class TestHoodieWriteConfigFileStitching {
 
   @Test
   public void testFileStitchingBinaryCopySchemaEvolutionConfig() {
-    // Test default value (should be true)
+    // Test default value (should be false)
     HoodieWriteConfig config1 = HoodieWriteConfig.newBuilder()
         .withPath("/test/path")
         .build();
-    assertTrue(config1.isFileStitchingBinaryCopySchemaEvolutionEnabled(),
-        "File stitching binary copy schema evolution should be enabled by default");
+    assertFalse(config1.isFileStitchingBinaryCopySchemaEvolutionEnabled(),
+        "File stitching binary copy schema evolution should be disabled by default");
 
     // Test explicitly setting to false
     Properties props = new Properties();
@@ -67,7 +67,7 @@ public class TestHoodieWriteConfigFileStitching {
         HoodieClusteringConfig.FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE.key(),
         "Config key should match expected value");
     
-    assertTrue(HoodieClusteringConfig.FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE.defaultValue(),
-        "Default value should be true to enable schema evolution");
+    assertFalse(HoodieClusteringConfig.FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE.defaultValue(),
+        "Default value should be false to disable schema evolution");
   }
 }
