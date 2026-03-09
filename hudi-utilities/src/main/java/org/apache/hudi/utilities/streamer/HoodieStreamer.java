@@ -60,8 +60,8 @@ import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.hive.HiveSyncTool;
 import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.storage.StoragePath;
-import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 import org.apache.hudi.utilities.HiveIncrementalPuller;
 import org.apache.hudi.utilities.IdentitySplitter;
 import org.apache.hudi.utilities.UtilHelpers;
@@ -157,11 +157,10 @@ public class HoodieStreamer implements Serializable {
                         Option<TypedProperties> propsOverride, Option<SourceProfileSupplier> sourceProfileSupplier) throws IOException {
     this.properties = combineProperties(cfg, propsOverride, jssc.hadoopConfiguration());
     Triple<RecordMergeMode, String, String> mergingConfigs =
-        HoodieTableConfig.inferCorrectMergingBehavior(
-            cfg.recordMergeMode, cfg.payloadClassName, cfg.recordMergeStrategyId, cfg.sourceOrderingField,
+        HoodieTableConfig.inferMergingConfigsForWrites(
+            cfg.recordMergeMode, cfg.payloadClassName, cfg.recordMergeStrategyId, cfg.sourceOrderingFields,
             HoodieTableVersion.fromVersionCode(ConfigUtils.getIntWithAltKeys(this.properties, HoodieWriteConfig.WRITE_TABLE_VERSION)));
     cfg.recordMergeMode = mergingConfigs.getLeft();
-    cfg.payloadClassName = mergingConfigs.getMiddle();
     cfg.recordMergeStrategyId = mergingConfigs.getRight();
     if (cfg.initialCheckpointProvider != null && cfg.checkpoint == null) {
       InitialCheckPointProvider checkPointProvider =
@@ -187,7 +186,8 @@ public class HoodieStreamer implements Serializable {
     //   3. Otherwise, parse provided specified props file (merging in CLI overrides)
     if (propsOverride.isPresent()) {
       hoodieConfig.setAll(propsOverride.get());
-    } else if (cfg.propsFilePath.equals(Config.DEFAULT_DFS_SOURCE_PROPERTIES)) {
+    } else if (StringUtils.isNullOrEmpty(cfg.propsFilePath)
+        || cfg.propsFilePath.equals(Config.DEFAULT_DFS_SOURCE_PROPERTIES)) {
       hoodieConfig.setAll(UtilHelpers.getConfig(cfg.configs).getProps());
     } else {
       hoodieConfig.setAll(readConfig(hadoopConf, new Path(cfg.propsFilePath), cfg.configs).getProps());
@@ -204,6 +204,9 @@ public class HoodieStreamer implements Serializable {
     if (!hoodieConfig.contains(HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES)
         && !StringUtils.isNullOrEmpty(cfg.recordMergeImplClasses)) {
       hoodieConfig.setValue(HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES.key(), cfg.recordMergeImplClasses);
+    }
+    if (!StringUtils.isNullOrEmpty(cfg.sourceOrderingFields)) {
+      hoodieConfig.setValue(HoodieTableConfig.ORDERING_FIELDS.key(), cfg.sourceOrderingFields);
     }
 
     return hoodieConfig.getProps(true);
@@ -272,9 +275,9 @@ public class HoodieStreamer implements Serializable {
             + "JsonKafkaSource, AvroKafkaSource, HiveIncrPullSource}")
     public String sourceClassName = JsonDFSSource.class.getName();
 
-    @Parameter(names = {"--source-ordering-field"}, description = "Field within source record to decide how"
-        + " to break ties between records with same key in input data.")
-    public String sourceOrderingField = null;
+    @Parameter(names = {"--source-ordering-fields", "--source-ordering-field"}, description = "Comma separated list of fields within source record to decide how"
+        + " to break ties between records with same key in input data. --source-ordering-field is deprecated, please use --source-ordering-fields instead")
+    public String sourceOrderingFields = null;
 
     @Parameter(names = {"--payload-class"}, description = "Deprecated. "
         + "Use --merge-mode for commit time or event time merging. "
@@ -366,6 +369,9 @@ public class HoodieStreamer implements Serializable {
         description = "spark master to use, if not defined inherits from your environment taking into "
             + "account Spark Configuration priority rules (e.g. not using spark-submit command).")
     public String sparkMaster = "";
+
+    @Parameter(names = {"--enable-hive-support"}, description = "Enables hive support during spark context initialization.")
+    public Boolean enableHiveSupport = true;
 
     @Parameter(names = {"--commit-on-errors"}, description = "Commit even when some records failed to be written")
     public Boolean commitOnErrors = false;
@@ -505,7 +511,7 @@ public class HoodieStreamer implements Serializable {
           && Objects.equals(propsFilePath, config.propsFilePath)
           && Objects.equals(configs, config.configs)
           && Objects.equals(sourceClassName, config.sourceClassName)
-          && Objects.equals(sourceOrderingField, config.sourceOrderingField)
+          && Objects.equals(sourceOrderingFields, config.sourceOrderingFields)
           && Objects.equals(payloadClassName, config.payloadClassName)
           && Objects.equals(schemaProviderClassName, config.schemaProviderClassName)
           && Objects.equals(transformerClassNames, config.transformerClassNames)
@@ -538,7 +544,7 @@ public class HoodieStreamer implements Serializable {
     public int hashCode() {
       return Objects.hash(targetBasePath, targetTableName, tableType,
           baseFileFormat, propsFilePath, configs, sourceClassName,
-          sourceOrderingField, payloadClassName, schemaProviderClassName,
+          sourceOrderingFields, payloadClassName, schemaProviderClassName,
           transformerClassNames, sourceLimit, operation, filterDupes,
           enableHiveSync, enableMetaSync, forceEmptyMetaSync, syncClientToolClassNames, maxPendingCompactions, maxPendingClustering,
           continuousMode, minSyncIntervalSeconds, sparkMaster, commitOnErrors,
@@ -557,7 +563,7 @@ public class HoodieStreamer implements Serializable {
           + ", propsFilePath='" + propsFilePath + '\''
           + ", configs=" + configs
           + ", sourceClassName='" + sourceClassName + '\''
-          + ", sourceOrderingField='" + sourceOrderingField + '\''
+          + ", sourceOrderingField='" + sourceOrderingFields + '\''
           + ", payloadClassName='" + payloadClassName + '\''
           + ", schemaProviderClassName='" + schemaProviderClassName + '\''
           + ", transformerClassNames=" + transformerClassNames
@@ -637,9 +643,9 @@ public class HoodieStreamer implements Serializable {
       sparkAppName = "streamer-" + cfg.targetTableName;
     }
     if (StringUtils.isNullOrEmpty(cfg.sparkMaster)) {
-      jssc = UtilHelpers.buildSparkContext(sparkAppName, additionalSparkConfigs);
+      jssc = UtilHelpers.buildSparkContext(sparkAppName, cfg.enableHiveSupport, additionalSparkConfigs);
     } else {
-      jssc = UtilHelpers.buildSparkContext(sparkAppName, cfg.sparkMaster, additionalSparkConfigs);
+      jssc = UtilHelpers.buildSparkContext(sparkAppName, cfg.sparkMaster, cfg.enableHiveSupport, additionalSparkConfigs);
     }
     if (cfg.enableHiveSync) {
       LOG.warn("--enable-hive-sync will be deprecated in a future release; please use --enable-sync instead for Hive syncing");
@@ -724,7 +730,8 @@ public class HoodieStreamer implements Serializable {
           .withMinSyncInternalSeconds(cfg.minSyncIntervalSeconds).build());
       this.cfg = cfg;
       this.hoodieSparkContext = hoodieSparkContext;
-      this.storage = new HoodieHadoopStorage(fs);
+      this.storage = HoodieStorageUtils.getStorage(
+              new StoragePath(cfg.targetBasePath), HadoopFSUtils.getStorageConf(fs.getConf()));
       this.hiveConf = conf;
       this.sparkSession = SparkSession.builder().config(hoodieSparkContext.getConf()).getOrCreate();
       this.asyncCompactService = Option.empty();
@@ -750,7 +757,7 @@ public class HoodieStreamer implements Serializable {
           properties.get().forEach((k, v) -> propsToValidate.put(k.toString(), v.toString()));
           HoodieWriterUtils.validateTableConfig(this.sparkSession, org.apache.hudi.HoodieConversionUtils.mapAsScalaImmutableMap(propsToValidate), meta.getTableConfig());
         } catch (HoodieIOException e) {
-          LOG.warn("Full exception msg " + e.getLocalizedMessage() + ",  msg " + e.getMessage());
+          LOG.warn("Full exception msg {},  msg {}", e.getLocalizedMessage(), e.getMessage());
           if (e.getMessage().contains("Could not load Hoodie properties") && e.getMessage().contains(HoodieTableConfig.HOODIE_PROPERTIES_FILE)) {
             initializeTableTypeAndBaseFileFormat();
           } else {
@@ -768,7 +775,6 @@ public class HoodieStreamer implements Serializable {
       LOG.info(toSortedTruncatedString(props));
 
       this.schemaProvider = UtilHelpers.wrapSchemaProviderWithPostProcessor(
-
           UtilHelpers.createSchemaProvider(cfg.schemaProviderClassName, props, hoodieSparkContext.jsc()),
           props, hoodieSparkContext.jsc(), cfg.transformerClassNames);
 
@@ -859,7 +865,7 @@ public class HoodieStreamer implements Serializable {
               Option<HoodieData<WriteStatus>> lastWriteStatuses = Option.ofNullable(
                   scheduledCompactionInstantAndRDD.isPresent() ? HoodieJavaRDD.of(scheduledCompactionInstantAndRDD.get().getRight()) : null);
               if (requestShutdownIfNeeded(lastWriteStatuses)) {
-                LOG.warn("Closing and shutting down ingestion service");
+                LOG.info("Closing and shutting down ingestion service");
                 error = true;
                 onIngestionCompletes(false);
                 shutdown(true);
@@ -901,13 +907,13 @@ public class HoodieStreamer implements Serializable {
      * Shutdown async services like compaction/clustering as DeltaSync is shutdown.
      */
     private void shutdownAsyncServices(boolean error) {
-      LOG.info("Delta Sync shutdown. Error ?" + error);
+      LOG.info("Delta Sync shutdown. Error ?{}", error);
       if (asyncCompactService.isPresent()) {
-        LOG.warn("Gracefully shutting down compactor");
+        LOG.info("Gracefully shutting down compactor");
         asyncCompactService.get().shutdown(false);
       }
       if (asyncClusteringService.isPresent()) {
-        LOG.warn("Gracefully shutting down clustering service");
+        LOG.info("Gracefully shutting down clustering service");
         asyncClusteringService.get().shutdown(false);
       }
     }

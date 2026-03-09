@@ -23,18 +23,18 @@ import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.fs.ConsistencyGuardConfig;
-import org.apache.hudi.common.model.HoodieAvroRecord;
+import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
-import org.apache.hudi.common.testutils.RawTripTestPayload;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieCleanConfig;
@@ -47,10 +47,9 @@ import org.apache.hudi.testutils.HoodieClientTestBase;
 import org.apache.hudi.testutils.HoodieSparkWriteableTestTable;
 import org.apache.hudi.testutils.MetadataMergeWriteStatus;
 
-import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.api.java.JavaRDD;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -98,21 +97,6 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
   @BeforeEach
   public void setUpTestTable() {
     HoodieSparkWriteableTestTable.of(metaClient);
-  }
-
-  //TODO: include both the table's contents.
-  /**
-   * Cleanups resource group for the subclasses of {@link HoodieClientTestBase}.
-   */
-  @AfterEach
-  public void cleanupResources() throws IOException {
-    cleanupTimelineService();
-    cleanupClients();
-    cleanupSparkContexts();
-    cleanupTestDataGenerator();
-    cleanupFileSystem();
-    cleanupExecutorService();
-    System.gc();
   }
 
   /**
@@ -178,7 +162,7 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
     // Verify row count.
     assertEquals(mainRecordsMap.size(), experimentRecordsMap.size());
 
-    Schema readerSchema = new Schema.Parser().parse(mainTable.config.getSchema());
+    HoodieSchema readerSchema = HoodieSchema.parse(mainTable.config.getSchema());
     List<String> excludeFields = CollectionUtils.createImmutableList(COMMIT_TIME_METADATA_FIELD, COMMIT_SEQNO_METADATA_FIELD,
         FILENAME_METADATA_FIELD, OPERATION_METADATA_FIELD, RECORD_KEY_METADATA_FIELD);
 
@@ -321,16 +305,16 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
     }
 
     private void updatePreviousGeneration(List<HoodieRecord> generatedRecords, String commitTimeOnMainTable, int previousActionType) {
-      Schema schema = new Schema.Parser().parse(this.config.getSchema());
-      this.generatedRecords = generatedRecords.stream().map(rec -> deepCopyAndModifyRecordKey(rec)).collect(Collectors.toList());
+      this.generatedRecords = generatedRecords.stream().map(this::deepCopyAndModifyRecordKey).collect(Collectors.toList());
       this.commitTimeOnMainTable = commitTimeOnMainTable;
       this.previousActionType = previousActionType;
     }
 
     private HoodieRecord deepCopyAndModifyRecordKey(HoodieRecord record) {
       HoodieKey key = deepCopyAndModifyRecordKey(record.getKey());
-      RawTripTestPayload payload = ((RawTripTestPayload)record.getData()).clone();
-      return new HoodieAvroRecord(key, payload);
+      GenericRecord data = (GenericRecord) record.getData();
+      GenericRecord copiedData = GenericData.get().deepCopy(data.getSchema(), data);
+      return new HoodieAvroIndexedRecord(key, copiedData);
     }
 
     private HoodieKey deepCopyAndModifyRecordKey(HoodieKey key) {

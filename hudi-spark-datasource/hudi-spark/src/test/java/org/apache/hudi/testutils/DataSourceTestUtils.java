@@ -19,15 +19,18 @@
 package org.apache.hudi.testutils;
 
 import org.apache.hudi.HoodieDataSourceHelpers;
+import org.apache.hudi.common.model.HoodieCommitMetadata;
+import org.apache.hudi.common.model.HoodieWriteStat;
+import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
-import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.io.util.FileIOUtils;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
-import org.apache.avro.Schema;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
@@ -48,6 +51,9 @@ import java.util.UUID;
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH;
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.DEFAULT_SECOND_PARTITION_PATH;
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.DEFAULT_THIRD_PARTITION_PATH;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Test utils for data source tests.
@@ -56,12 +62,12 @@ public class DataSourceTestUtils {
 
   private static final Random RANDOM = new Random(0xDAADDEED);
 
-  public static Schema getStructTypeExampleSchema() throws IOException {
-    return new Schema.Parser().parse(FileIOUtils.readAsUTFString(DataSourceTestUtils.class.getResourceAsStream("/exampleSchema.txt")));
+  public static HoodieSchema getStructTypeExampleSchema() throws IOException {
+    return HoodieSchema.parse(FileIOUtils.readAsUTFString(DataSourceTestUtils.class.getResourceAsStream("/exampleSchema.txt")));
   }
 
-  public static Schema getStructTypeExampleEvolvedSchema() throws IOException {
-    return new Schema.Parser().parse(FileIOUtils.readAsUTFString(DataSourceTestUtils.class.getResourceAsStream("/exampleEvolvedSchema.txt")));
+  public static HoodieSchema getStructTypeExampleEvolvedSchema() throws IOException {
+    return HoodieSchema.parse(FileIOUtils.readAsUTFString(DataSourceTestUtils.class.getResourceAsStream("/exampleEvolvedSchema.txt")));
   }
 
   public static List<Row> generateRandomRows(int count) {
@@ -178,11 +184,6 @@ public class DataSourceTestUtils {
     return true;
   }
 
-  public static String latestCommitCompletionTime(FileSystem fs, String basePath) {
-    return HoodieDataSourceHelpers.allCompletedCommitsCompactions(fs, basePath)
-        .getLatestCompletionTime().orElse(null);
-  }
-
   public static String latestCommitCompletionTime(HoodieStorage storage, String basePath) {
     return HoodieDataSourceHelpers.allCompletedCommitsCompactions(storage, basePath)
         .getLatestCompletionTime().orElse(null);
@@ -203,5 +204,34 @@ public class DataSourceTestUtils {
     return HoodieDataSourceHelpers.allCompletedCommitsCompactions(storage, basePath)
         .filter(instant -> HoodieTimeline.DELTA_COMMIT_ACTION.equals(instant.getAction()))
         .lastInstant().map(instant -> instant.requestedTime()).orElse(null);
+  }
+
+  public static void validateCommitMetadata(HoodieCommitMetadata commitMetadata, String previousCommit, long expectedTotalRecordsWritten, long expectedTotalUpdatedRecords,
+                                            long expectedTotalInsertedRecords, long expectedTotalDeletedRecords) {
+    long totalRecordsWritten = 0;
+    long totalDeletedRecords = 0;
+    long totalUpdatedRecords = 0;
+    long totalInsertedRecords = 0;
+    for (HoodieWriteStat writeStat : commitMetadata.getWriteStats()) {
+      totalRecordsWritten += writeStat.getNumWrites();
+      totalDeletedRecords += writeStat.getNumDeletes();
+      totalUpdatedRecords += writeStat.getNumUpdateWrites();
+      totalInsertedRecords += writeStat.getNumInserts();
+      assertEquals(previousCommit, writeStat.getPrevCommit());
+      assertNotNull(writeStat.getFileId());
+      assertNotNull(writeStat.getPath());
+      assertTrue(writeStat.getFileSizeInBytes() > 0);
+      assertTrue(writeStat.getTotalWriteBytes() > 0);
+      if (commitMetadata.getOperationType() == WriteOperationType.COMPACT) {
+        assertTrue(writeStat.getTotalLogBlocks() > 0);
+        assertTrue(writeStat.getTotalLogSizeCompacted() > 0);
+        assertTrue(writeStat.getTotalLogFilesCompacted() > 0);
+        assertTrue(writeStat.getTotalLogRecords() > 0);
+      }
+    }
+    assertEquals(expectedTotalRecordsWritten, totalRecordsWritten);
+    assertEquals(expectedTotalUpdatedRecords, totalUpdatedRecords);
+    assertEquals(expectedTotalInsertedRecords, totalInsertedRecords);
+    assertEquals(expectedTotalDeletedRecords, totalDeletedRecords);
   }
 }

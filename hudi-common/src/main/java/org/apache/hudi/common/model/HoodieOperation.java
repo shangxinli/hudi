@@ -20,9 +20,15 @@ package org.apache.hudi.common.model;
 
 import org.apache.hudi.common.util.Option;
 
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
 /**
  * Represents the changes that a row can describe in a changelog.
  */
+@AllArgsConstructor(access = AccessLevel.PACKAGE)
+@Getter
 public enum HoodieOperation {
   /**
    * Insert operation.
@@ -44,19 +50,6 @@ public enum HoodieOperation {
 
   private final String name;
   private final byte value;
-
-  HoodieOperation(String name, byte value) {
-    this.name = name;
-    this.value = value;
-  }
-
-  public String getName() {
-    return name;
-  }
-
-  public byte getValue() {
-    return value;
-  }
 
   public static HoodieOperation fromValue(byte value) {
     switch (value) {
@@ -107,6 +100,13 @@ public enum HoodieOperation {
    */
   public static boolean isUpdateBefore(HoodieOperation operation) {
     return operation == UPDATE_BEFORE;
+  }
+
+  /**
+   * Returns whether the operation is UPDATE_BEFORE.
+   */
+  public static boolean isUpdateBefore(String operation) {
+    return isUpdateBefore(fromName(operation));
   }
 
   /**

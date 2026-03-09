@@ -18,12 +18,13 @@
 
 package org.apache.hudi.client.functional;
 
-import org.apache.hudi.avro.HoodieAvroUtils;
+import org.apache.hudi.avro.HoodieAvroReaderContext;
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
 import org.apache.hudi.avro.model.HoodieCleanerPlan;
 import org.apache.hudi.avro.model.HoodieMetadataRecord;
 import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
@@ -33,24 +34,26 @@ import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.log.HoodieLogFormat;
 import org.apache.hudi.common.table.log.block.HoodieDataBlock;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock;
+import org.apache.hudi.common.table.read.HoodieFileGroupReader;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.view.TableFileSystemView;
 import org.apache.hudi.common.testutils.HoodieTestTable;
 import org.apache.hudi.common.util.CleanerUtils;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
-import org.apache.hudi.common.util.collection.ExternalSpillableMap;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.io.storage.HoodieAvroHFileReaderImplBase;
 import org.apache.hudi.metadata.HoodieBackedTableMetadata;
-import org.apache.hudi.metadata.HoodieMetadataLogRecordReader;
 import org.apache.hudi.metadata.HoodieMetadataPayload;
 import org.apache.hudi.metadata.HoodieTableMetadataKeyGenerator;
 import org.apache.hudi.storage.StoragePath;
@@ -58,15 +61,15 @@ import org.apache.hudi.storage.StoragePathInfo;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
 
-import org.apache.avro.Schema;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -83,6 +86,8 @@ import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
+import static org.apache.hudi.common.model.HoodieTableType.COPY_ON_WRITE;
+import static org.apache.hudi.common.model.HoodieTableType.MERGE_ON_READ;
 import static org.apache.hudi.common.model.WriteOperationType.BULK_INSERT;
 import static org.apache.hudi.common.model.WriteOperationType.COMPACT;
 import static org.apache.hudi.common.model.WriteOperationType.INSERT;
@@ -98,14 +103,24 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+@Slf4j
 public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
 
-  private static final Logger LOG = LoggerFactory.getLogger(TestHoodieBackedTableMetadata.class);
+  public static List<Arguments> testTableOperationsArgs() {
+    return Arrays.asList(
+        Arguments.of(true, 6),
+        Arguments.of(true, 8),
+        Arguments.of(true, HoodieTableVersion.current().versionCode()),
+        Arguments.of(false, 6),
+        Arguments.of(false, 8),
+        Arguments.of(false, HoodieTableVersion.current().versionCode())
+    );
+  }
 
   @ParameterizedTest
-  @CsvSource({"true,6", "true,8", "false,6", "false,8"})
+  @MethodSource("testTableOperationsArgs")
   public void testTableOperations(boolean reuseReaders, int tableVersion) throws Exception {
-    HoodieTableType tableType = HoodieTableType.COPY_ON_WRITE;
+    HoodieTableType tableType = COPY_ON_WRITE;
     initPath();
     HoodieWriteConfig config = getWriteConfigBuilder(HoodieFailedWritesCleaningPolicy.EAGER, true, true, false, true, false)
         .build();
@@ -128,57 +143,57 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
    * @throws Exception
    */
   @ParameterizedTest
-  @CsvSource({"true,6", "true,8", "false,6", "false,8"})
+  @MethodSource("testTableOperationsArgs")
   public void testMultiReaderForHoodieBackedTableMetadata(boolean reuse, int tableVersion) throws Exception {
-    final int taskNumber = 3;
-    HoodieTableType tableType = HoodieTableType.COPY_ON_WRITE;
+    final int taskNumber = 18;
+    HoodieTableType tableType = COPY_ON_WRITE;
     initPath();
     HoodieWriteConfig config = getWriteConfigBuilder(HoodieFailedWritesCleaningPolicy.EAGER, true, true, false, true, false)
         .build();
     config.setValue(HoodieWriteConfig.WRITE_TABLE_VERSION, String.valueOf(tableVersion));
     init(tableType, config);
     testTable.doWriteOperation("000001", INSERT, emptyList(), asList("p1"), 1);
+    testTable.doWriteOperation("000002", INSERT, emptyList(), asList("p2"), 2);
+    testTable.doWriteOperation("000003", INSERT, emptyList(), asList("p3"), 3);
     HoodieBackedTableMetadata tableMetadata = new HoodieBackedTableMetadata(context, storage, writeConfig.getMetadataConfig(), writeConfig.getBasePath(), reuse);
     assertTrue(tableMetadata.enabled());
-    List<String> metadataPartitions = tableMetadata.getAllPartitionPaths();
-    String partition = metadataPartitions.get(0);
-    String finalPartition = basePath + "/" + partition;
     ExecutorService executors = Executors.newFixedThreadPool(taskNumber);
     AtomicBoolean flag = new AtomicBoolean(false);
     CountDownLatch downLatch = new CountDownLatch(taskNumber);
     AtomicInteger filesNumber = new AtomicInteger(0);
 
-    // call getAllFilesInPartition api from meta data table in parallel
+    // call getAllFilesInPartition api from metadata table in parallel across different partitions
+    // when reuse is true, we will reuse the same buffer of merged log records so we must ensure this works in a multithreaded environment
     for (int i = 0; i < taskNumber; i++) {
-      executors.submit(new Runnable() {
-        @Override
-        public void run() {
-          try {
-            downLatch.countDown();
-            downLatch.await();
-            List<StoragePathInfo> files =
-                tableMetadata.getAllFilesInPartition(new StoragePath(finalPartition));
-            if (files.size() != 1) {
-              LOG.warn("Miss match data file numbers.");
-              throw new RuntimeException("Miss match data file numbers.");
-            }
-            filesNumber.addAndGet(files.size());
-          } catch (Exception e) {
-            LOG.warn("Catch Exception while reading data files from MDT.", e);
-            flag.compareAndSet(false, true);
+      final int partitionNumber = (i % 3) + 1;
+      executors.submit(() -> {
+        try {
+          String finalPartition = basePath + "/p" + partitionNumber;
+          downLatch.countDown();
+          downLatch.await();
+          List<StoragePathInfo> files =
+              tableMetadata.getAllFilesInPartition(new StoragePath(finalPartition));
+          // p1 has 1 file, p2 has 2 files, p3 has 3 files for convenience
+          if (files.size() != partitionNumber) {
+            throw new RuntimeException("Miss match data file numbers for partition: " + finalPartition + ", expected: " + partitionNumber + ", actual: " + files.size());
           }
+          filesNumber.addAndGet(files.size());
+        } catch (Exception e) {
+          log.warn("Catch Exception while reading data files from MDT.", e);
+          flag.compareAndSet(false, true);
         }
       });
     }
     executors.shutdown();
     executors.awaitTermination(5, TimeUnit.MINUTES);
     assertFalse(flag.get());
-    assertEquals(filesNumber.get(), taskNumber);
+    assertEquals(36, filesNumber.get()); // 3 files for p3, 2 files for p2, 1 file for p1 and two readers for each partition
 
     // validate table version
     HoodieTableVersion finalTableVersion = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build()
         .getTableConfig().getTableVersion();
     assertEquals(tableVersion, finalTableVersion.versionCode());
+    tableMetadata.close();
   }
 
   private void doWriteInsertAndUpsert(HoodieTestTable testTable) throws Exception {
@@ -220,12 +235,23 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
     });
   }
 
+  public static List<Arguments> testMetadataTableKeyGeneratorArgs() {
+    return Arrays.asList(
+        Arguments.of(COPY_ON_WRITE, 6),
+        Arguments.of(COPY_ON_WRITE, 8),
+        Arguments.of(COPY_ON_WRITE, HoodieTableVersion.current().versionCode()),
+        Arguments.of(MERGE_ON_READ, 6),
+        Arguments.of(MERGE_ON_READ, 8),
+        Arguments.of(MERGE_ON_READ, HoodieTableVersion.current().versionCode())
+    );
+  }
+
   /**
    * Verify if the Metadata table is constructed with table properties including
    * the right key generator class name.
    */
   @ParameterizedTest
-  @CsvSource({"COPY_ON_WRITE,6", "COPY_ON_WRITE,8", "MERGE_ON_READ,6", "MERGE_ON_READ,8"})
+  @MethodSource("testMetadataTableKeyGeneratorArgs")
   public void testMetadataTableKeyGenerator(final HoodieTableType tableType, int tableVersion) throws Exception {
     initPath();
     HoodieWriteConfig config = getWriteConfigBuilder(HoodieFailedWritesCleaningPolicy.EAGER, true, true, false, true, false)
@@ -249,7 +275,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
    * [HUDI-2852] Table metadata returns empty for non-exist partition.
    */
   @ParameterizedTest
-  @CsvSource({"COPY_ON_WRITE,6", "COPY_ON_WRITE,8", "MERGE_ON_READ,6", "MERGE_ON_READ,8"})
+  @MethodSource("testMetadataTableKeyGeneratorArgs")
   public void testNotExistPartition(final HoodieTableType tableType, int tableVersion) throws Exception {
     initPath();
     HoodieWriteConfig config = getWriteConfigBuilder(HoodieFailedWritesCleaningPolicy.EAGER, true, true, false, true, false)
@@ -276,7 +302,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
    * 3. Verify table services like compaction benefit from record key deduplication feature.
    */
   @ParameterizedTest
-  @CsvSource({"COPY_ON_WRITE,6", "COPY_ON_WRITE,8", "MERGE_ON_READ,6", "MERGE_ON_READ,8"})
+  @MethodSource("testMetadataTableKeyGeneratorArgs")
   public void testMetadataRecordKeyExcludeFromPayload(final HoodieTableType tableType, int tableVersion) throws Exception {
     initPath();
     writeConfig = getWriteConfigBuilder(true, true, false)
@@ -299,7 +325,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
     // Compaction has not yet kicked in. Verify all the log files
     // for the metadata records persisted on disk as per the config.
     assertDoesNotThrow(() -> {
-      verifyMetadataRecordKeyExcludeFromPayloadLogFiles(table, metadataMetaClient, "0000001");
+      verifyMetadataRecordKeyExcludeFromPayloadLogFiles(table, metadataMetaClient, "0000001", metadataTableWriteConfig);
     }, "Metadata table should have valid log files!");
 
     verifyMetadataRecordKeyExcludeFromPayloadBaseFiles(table);
@@ -311,7 +337,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
     // Compaction should be triggered by now. Let's verify the log files
     // if any for the metadata records persisted on disk as per the config.
     assertDoesNotThrow(() -> {
-      verifyMetadataRecordKeyExcludeFromPayloadLogFiles(table, metadataMetaClient, "0000002");
+      verifyMetadataRecordKeyExcludeFromPayloadLogFiles(table, metadataMetaClient, "0000002", metadataTableWriteConfig);
     }, "Metadata table should have valid log files!");
 
     // Verify the base file created by the just completed compaction.
@@ -325,7 +351,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
     doWriteOperation(testTable, "0000007", UPSERT);
 
     assertDoesNotThrow(() -> {
-      verifyMetadataRecordKeyExcludeFromPayloadLogFiles(table, metadataMetaClient, "7");
+      verifyMetadataRecordKeyExcludeFromPayloadLogFiles(table, metadataMetaClient, "7", metadataTableWriteConfig);
     }, "Metadata table should have valid log files!");
 
     assertDoesNotThrow(() -> {
@@ -347,7 +373,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
    * plan has not been successfully executed before the new one is scheduled.
    */
   @ParameterizedTest
-  @CsvSource({"COPY_ON_WRITE,6", "COPY_ON_WRITE,8", "MERGE_ON_READ,6", "MERGE_ON_READ,8"})
+  @MethodSource("testMetadataTableKeyGeneratorArgs")
   public void testRepeatedCleanActionsWithMetadataTableEnabled(final HoodieTableType tableType, int tableVersion) throws Exception {
     initPath();
     writeConfig = getWriteConfigBuilder(true, true, false)
@@ -460,7 +486,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
    * @throws IOException
    */
   private void verifyMetadataRecordKeyExcludeFromPayloadLogFiles(HoodieTable table, HoodieTableMetaClient metadataMetaClient,
-                                                                 String latestCommitTimestamp) throws IOException {
+                                                                 String latestCommitTimestamp, HoodieWriteConfig metadataTableWriteConfig) throws IOException {
     table.getHoodieView().sync();
 
     // Compaction should not be triggered yet. Let's verify no base file
@@ -472,19 +498,13 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
     }
 
     // Verify the log files honor the key deduplication and virtual keys config
-    List<HoodieLogFile> logFiles = fileSlices.get(0).getLogFiles().map(logFile -> {
-      return logFile;
-    }).collect(Collectors.toList());
-
-    List<String> logFilePaths = logFiles.stream().map(logFile -> {
-      return logFile.getPath().toString();
-    }).collect(Collectors.toList());
+    List<HoodieLogFile> logFiles = fileSlices.get(0).getLogFiles().collect(Collectors.toList());
 
     // Verify the on-disk raw records before they get materialized
     verifyMetadataRawRecords(table, logFiles);
 
     // Verify the in-memory materialized and merged records
-    verifyMetadataMergedRecords(metadataMetaClient, logFilePaths, latestCommitTimestamp);
+    verifyMetadataMergedRecords(metadataMetaClient, logFiles, latestCommitTimestamp, metadataTableWriteConfig);
   }
 
   /**
@@ -499,7 +519,7 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
   private void verifyMetadataRawRecords(HoodieTable table, List<HoodieLogFile> logFiles) throws IOException {
     for (HoodieLogFile logFile : logFiles) {
       List<StoragePathInfo> pathInfoList = storage.listDirectEntries(logFile.getPath());
-      Schema writerSchema  =
+      HoodieSchema writerSchema  =
           TableSchemaResolver.readSchemaFromLogFile(storage, logFile.getPath());
       if (writerSchema == null) {
         // not a data block
@@ -534,27 +554,31 @@ public class TestHoodieBackedTableMetadata extends TestHoodieMetadataBase {
    * payload fully materialized.
    *
    * @param metadataMetaClient    - Metadata table meta client
-   * @param logFilePaths          - Metadata table log file paths
+   * @param logFiles              - Metadata table log files
    * @param latestCommitTimestamp - Latest commit timestamp
    */
-  private void verifyMetadataMergedRecords(HoodieTableMetaClient metadataMetaClient, List<String> logFilePaths, String latestCommitTimestamp) {
-    Schema schema = HoodieAvroUtils.addMetadataFields(HoodieMetadataRecord.getClassSchema());
-    HoodieMetadataLogRecordReader logRecordReader = HoodieMetadataLogRecordReader.newBuilder()
-        .withStorage(metadataMetaClient.getStorage())
-        .withBasePath(metadataMetaClient.getBasePath())
-        .withLogFilePaths(logFilePaths)
-        .withLatestInstantTime(latestCommitTimestamp)
-        .withPartition(FILES.getPartitionPath())
-        .withReaderSchema(schema)
-        .withMaxMemorySizeInBytes(100000L)
-        .withBufferSize(4096)
-        .withSpillableMapBasePath(tempDir.toString())
-        .withDiskMapType(ExternalSpillableMap.DiskMapType.BITCASK)
+  private void verifyMetadataMergedRecords(HoodieTableMetaClient metadataMetaClient, List<HoodieLogFile> logFiles, String latestCommitTimestamp, HoodieWriteConfig metadataTableWriteConfig) {
+    HoodieSchema schema = HoodieSchemaUtils.addMetadataFields(HoodieSchema.fromAvroSchema(HoodieMetadataRecord.getClassSchema()));
+    HoodieAvroReaderContext readerContext = new HoodieAvroReaderContext(metadataMetaClient.getStorageConf(), metadataMetaClient.getTableConfig(), Option.empty(), Option.empty());
+    HoodieFileGroupReader<IndexedRecord> fileGroupReader = HoodieFileGroupReader.<IndexedRecord>newBuilder()
+        .withReaderContext(readerContext)
+        .withHoodieTableMetaClient(metadataMetaClient)
+        .withLogFiles(logFiles.stream())
+        .withBaseFileOption(Option.empty())
+        .withPartitionPath(FILES.getPartitionPath())
+        .withLatestCommitTime(latestCommitTimestamp)
+        .withRequestedSchema(schema)
+        .withDataSchema(schema)
+        .withProps(new TypedProperties())
         .build();
 
-    for (HoodieRecord<?> entry : logRecordReader.getRecords()) {
-      assertFalse(entry.getRecordKey().isEmpty());
-      assertEquals(entry.getKey().getRecordKey(), entry.getRecordKey());
+    try (ClosableIterator<HoodieRecord<IndexedRecord>> iter = fileGroupReader.getClosableHoodieRecordIterator()) {
+      iter.forEachRemaining(entry -> {
+        assertFalse(entry.getRecordKey().isEmpty());
+        assertEquals(entry.getKey().getRecordKey(), entry.getRecordKey());
+      });
+    } catch (IOException ex) {
+      throw new UncheckedIOException(ex);
     }
   }
 

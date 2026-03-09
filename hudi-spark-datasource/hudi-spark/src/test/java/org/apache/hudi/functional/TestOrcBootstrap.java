@@ -30,16 +30,16 @@ import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.bootstrap.index.BootstrapIndex;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
-import org.apache.hudi.common.model.HoodieAvroRecord;
+import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.FileCreateUtilsLegacy;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
-import org.apache.hudi.common.testutils.RawTripTestPayload;
 import org.apache.hudi.common.util.AvroOrcUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.PartitionPathEncodeUtils;
@@ -58,7 +58,6 @@ import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.bootstrap.BootstrapUtils;
 import org.apache.hudi.testutils.HoodieSparkClientTestBase;
 
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -88,6 +87,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -144,8 +144,8 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
 
   }
 
-  public Schema generateNewDataSetAndReturnSchema(long timestamp, int numRecords, List<String> partitionPaths,
-                                                  String srcPath) throws Exception {
+  public HoodieSchema generateNewDataSetAndReturnSchema(long timestamp, int numRecords, List<String> partitionPaths,
+                                                        String srcPath) throws Exception {
     boolean isPartitioned = partitionPaths != null && !partitionPaths.isEmpty();
     Dataset<Row> df =
         generateTestRawTripDataset(timestamp, 0, numRecords, partitionPaths, jsc, sqlContext);
@@ -165,7 +165,7 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
 
     TypeDescription orcSchema = orcReader.getSchema();
 
-    return AvroOrcUtils.createAvroSchemaWithDefaultValue(orcSchema, "test_orc_record", null, true);
+    return AvroOrcUtils.createSchemaWithDefaultValue(orcSchema, "test_orc_record", null, true);
   }
 
   @Test
@@ -234,7 +234,7 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
     }
     List<String> partitions = Arrays.asList("2020/04/01", "2020/04/02", "2020/04/03");
     long timestamp = Instant.now().toEpochMilli();
-    Schema schema = generateNewDataSetAndReturnSchema(timestamp, totalRecords, partitions, bootstrapBasePath);
+    HoodieSchema schema = generateNewDataSetAndReturnSchema(timestamp, totalRecords, partitions, bootstrapBasePath);
     HoodieWriteConfig config = getConfigBuilder(schema.toString(), partitioned)
         .withSchema(schema.toString())
         .withKeyGenerator(keyGeneratorClass)
@@ -351,13 +351,13 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
     testBootstrapCommon(true, true, EffectiveMode.MIXED_BOOTSTRAP_MODE);
   }
 
-  private void checkBootstrapResults(int totalRecords, Schema schema, String maxInstant, boolean checkNumRawFiles,
+  private void checkBootstrapResults(int totalRecords, HoodieSchema schema, String maxInstant, boolean checkNumRawFiles,
                                      int expNumInstants, long expTimestamp, long expROTimestamp, boolean isDeltaCommit, boolean validateRecordsForCommitTime) throws Exception {
     checkBootstrapResults(totalRecords, schema, maxInstant, checkNumRawFiles, expNumInstants, expNumInstants,
-        expTimestamp, expROTimestamp, isDeltaCommit, Arrays.asList(maxInstant), validateRecordsForCommitTime);
+        expTimestamp, expROTimestamp, isDeltaCommit, Collections.singletonList(maxInstant), validateRecordsForCommitTime);
   }
 
-  private void checkBootstrapResults(int totalRecords, Schema schema, String instant, boolean checkNumRawFiles,
+  private void checkBootstrapResults(int totalRecords, HoodieSchema schema, String instant, boolean checkNumRawFiles,
                                      int expNumInstants, int numVersions, long expTimestamp, long expROTimestamp, boolean isDeltaCommit,
                                      List<String> instantsWithValidRecords, boolean validateCommitRecords) throws Exception {
     metaClient.reloadActiveTimeline();
@@ -420,8 +420,8 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
             new Path(filePath), new OrcFile.ReaderOptions(jsc.hadoopConfiguration()));
 
         TypeDescription orcSchema = orcReader.getSchema();
-        Schema avroSchema = AvroOrcUtils.createAvroSchemaWithDefaultValue(orcSchema, "test_orc_record", null, true);
-        return generateInputBatch(jsc, partitionPaths, avroSchema);
+        HoodieSchema hoodieSchema = AvroOrcUtils.createSchemaWithDefaultValue(orcSchema, "test_orc_record", null, true);
+        return generateInputBatch(jsc, partitionPaths, hoodieSchema);
 
       } catch (IOException ioe) {
         throw new HoodieIOException(ioe.getMessage(), ioe);
@@ -430,13 +430,13 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
   }
 
   private static JavaRDD<HoodieRecord> generateInputBatch(JavaSparkContext jsc,
-                                                          List<Pair<String, List<HoodieFileStatus>>> partitionPaths, Schema writerSchema) {
+                                                          List<Pair<String, List<HoodieFileStatus>>> partitionPaths, HoodieSchema writerSchema) {
     List<Pair<String, Path>> fullFilePathsWithPartition = partitionPaths.stream().flatMap(p -> p.getValue().stream()
         .map(x -> Pair.of(p.getKey(), HadoopFSUtils.toPath(x.getPath())))).collect(Collectors.toList());
     return jsc.parallelize(fullFilePathsWithPartition.stream().flatMap(p -> {
       try {
         Configuration conf = jsc.hadoopConfiguration();
-        AvroReadSupport.setAvroReadSchema(conf, writerSchema);
+        AvroReadSupport.setAvroReadSchema(conf, writerSchema.toAvroSchema());
         Reader orcReader = OrcFile.createReader(
             p.getValue(),
             new OrcFile.ReaderOptions(jsc.hadoopConfiguration()));
@@ -444,19 +444,14 @@ public class TestOrcBootstrap extends HoodieSparkClientTestBase {
 
         TypeDescription orcSchema = orcReader.getSchema();
 
-        Schema avroSchema = AvroOrcUtils.createAvroSchemaWithDefaultValue(orcSchema, "test_orc_record", null, true);
+        HoodieSchema hoodieSchema = AvroOrcUtils.createSchemaWithDefaultValue(orcSchema, "test_orc_record", null, true);
 
-        Iterator<GenericRecord> recIterator = new OrcReaderIterator(recordReader, avroSchema, orcSchema);
+        Iterator<GenericRecord> recIterator = new OrcReaderIterator(recordReader, hoodieSchema, orcSchema);
 
         return StreamSupport.stream(Spliterators.spliteratorUnknownSize(recIterator, 0), false).map(gr -> {
-          try {
-            String key = gr.get("_row_key").toString();
-            String pPath = p.getKey();
-            return new HoodieAvroRecord<>(new HoodieKey(key, pPath), new RawTripTestPayload(gr.toString(), key, pPath,
-                HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA));
-          } catch (IOException e) {
-            throw new HoodieIOException(e.getMessage(), e);
-          }
+          String key = gr.get("_row_key").toString();
+          String pPath = p.getKey();
+          return new HoodieAvroIndexedRecord(new HoodieKey(key, pPath), gr);
         });
       } catch (IOException ioe) {
         throw new HoodieIOException(ioe.getMessage(), ioe);

@@ -18,8 +18,8 @@
 
 package org.apache.hudi.sink.utils;
 
+import org.apache.hudi.adapter.SinkFunctionAdapter;
 import org.apache.hudi.client.model.HoodieFlinkInternalRow;
-import org.apache.hudi.client.model.HoodieFlinkInternalRowTypeInfo;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
@@ -38,6 +38,7 @@ import org.apache.hudi.sink.bucket.BucketStreamWriteOperator;
 import org.apache.hudi.sink.bucket.ConsistentBucketAssignFunction;
 import org.apache.hudi.sink.bulk.BulkInsertWriteOperator;
 import org.apache.hudi.sink.bulk.RowDataKeyGen;
+import org.apache.hudi.sink.bulk.RowDataKeyGens;
 import org.apache.hudi.sink.bulk.sort.SortOperatorGen;
 import org.apache.hudi.sink.clustering.ClusteringCommitEvent;
 import org.apache.hudi.sink.clustering.ClusteringCommitSink;
@@ -52,6 +53,11 @@ import org.apache.hudi.sink.compact.CompactionPlanEvent;
 import org.apache.hudi.sink.compact.CompactionPlanOperator;
 import org.apache.hudi.sink.partitioner.BucketAssignFunction;
 import org.apache.hudi.sink.partitioner.BucketIndexPartitioner;
+import org.apache.hudi.sink.partitioner.MiniBatchBucketAssignOperator;
+import org.apache.hudi.sink.partitioner.RecordIndexPartitioner;
+import org.apache.hudi.sink.partitioner.index.IndexRowUtils;
+import org.apache.hudi.sink.partitioner.index.IndexWriteOperator;
+import org.apache.hudi.sink.partitioner.MinibatchBucketAssignFunction;
 import org.apache.hudi.sink.transform.RowDataToHoodieFunctions;
 import org.apache.hudi.table.format.FilePathUtils;
 
@@ -61,7 +67,6 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.operators.KeyedProcessOperator;
 import org.apache.flink.streaming.api.operators.ProcessOperator;
 import org.apache.flink.table.data.RowData;
@@ -111,7 +116,7 @@ public class Pipelines {
   public static DataStream<RowData> bulkInsert(Configuration conf, RowType rowType, DataStream<RowData> dataStream) {
     // we need same parallelism for all operators,
     // which is equal to write tasks number, to avoid shuffles
-    final int PARALLELISM_VALUE = conf.getInteger(FlinkOptions.WRITE_TASKS);
+    final int PARALLELISM_VALUE = conf.get(FlinkOptions.WRITE_TASKS);
     final boolean isBucketIndexType = OptionsResolver.isBucketIndexType(conf);
 
     if (isBucketIndexType) {
@@ -122,7 +127,7 @@ public class Pipelines {
       }
       String indexKeys = OptionsResolver.getIndexKeyField(conf);
       BucketIndexPartitioner<HoodieKey> partitioner = new BucketIndexPartitioner<>(conf, indexKeys);
-      RowDataKeyGen keyGen = RowDataKeyGen.instance(conf, rowType);
+      RowDataKeyGen keyGen = RowDataKeyGens.instance(conf, rowType);
       RowType rowTypeWithFileId = BucketBulkInsertWriterHelper.rowTypeWithFileId(rowType);
       InternalTypeInfo<RowData> typeInfo = InternalTypeInfo.of(rowTypeWithFileId);
       boolean needFixedFileIdSuffix = OptionsResolver.isNonBlockingConcurrencyControl(conf);
@@ -131,30 +136,30 @@ public class Pipelines {
       dataStream = dataStream.partitionCustom(partitioner, keyGen::getHoodieKey)
           .map(record -> BucketBulkInsertWriterHelper.rowWithFileId(bucketIdToFileId, keyGen, record, indexKeys, conf, needFixedFileIdSuffix), typeInfo)
           .setParallelism(PARALLELISM_VALUE);
-      if (conf.getBoolean(FlinkOptions.WRITE_BULK_INSERT_SORT_INPUT)) {
+      if (conf.get(FlinkOptions.WRITE_BULK_INSERT_SORT_INPUT)) {
         SortOperatorGen sortOperatorGen = BucketBulkInsertWriterHelper.getFileIdSorterGen(rowTypeWithFileId);
         dataStream = dataStream.transform("file_sorter", typeInfo, sortOperatorGen.createSortOperator(conf))
             .setParallelism(PARALLELISM_VALUE);
         ExecNodeUtil.setManagedMemoryWeight(dataStream.getTransformation(),
-            conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
+            conf.get(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
       }
     } else if (!FlinkOptions.isDefaultValueDefined(conf, FlinkOptions.PARTITION_PATH_FIELD)) {
       // if table is not partitioned then we don't need any shuffles,
       // and could add main write operator only
-      if (conf.getBoolean(FlinkOptions.WRITE_BULK_INSERT_SHUFFLE_INPUT)) {
+      if (conf.get(FlinkOptions.WRITE_BULK_INSERT_SHUFFLE_INPUT)) {
         // shuffle by partition keys
         // use #partitionCustom instead of #keyBy to avoid duplicate sort operations,
         // see BatchExecutionUtils#applyBatchExecutionSettings for details.
         Partitioner<String> partitioner = (key, channels) -> KeyGroupRangeAssignment.assignKeyToParallelOperator(key,
             KeyGroupRangeAssignment.computeDefaultMaxParallelism(PARALLELISM_VALUE), channels);
-        RowDataKeyGen rowDataKeyGen = RowDataKeyGen.instance(conf, rowType);
+        RowDataKeyGen rowDataKeyGen = RowDataKeyGens.instance(conf, rowType);
         dataStream = dataStream.partitionCustom(partitioner, rowDataKeyGen::getPartitionPath);
       }
 
-      if (conf.getBoolean(FlinkOptions.WRITE_BULK_INSERT_SORT_INPUT)) {
-        final boolean isNeededSortInput = conf.getBoolean(FlinkOptions.WRITE_BULK_INSERT_SORT_INPUT_BY_RECORD_KEY);
+      if (conf.get(FlinkOptions.WRITE_BULK_INSERT_SORT_INPUT)) {
+        final boolean isNeededSortInput = conf.get(FlinkOptions.WRITE_BULK_INSERT_SORT_INPUT_BY_RECORD_KEY);
         final String[] partitionFields = FilePathUtils.extractPartitionKeys(conf);
-        final String[] recordKeyFields = conf.getString(FlinkOptions.RECORD_KEY_FIELD).split(",");
+        final String[] recordKeyFields = OptionsResolver.getRecordKeyStr(conf).split(",");
 
         // if sort input by record key is needed then add record keys to partition keys
         String[] sortFields = isNeededSortInput
@@ -166,7 +171,7 @@ public class Pipelines {
                 InternalTypeInfo.of(rowType), sortOperatorGen.createSortOperator(conf))
             .setParallelism(PARALLELISM_VALUE);
         ExecNodeUtil.setManagedMemoryWeight(dataStream.getTransformation(),
-            conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
+            conf.get(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
       }
     }
 
@@ -209,7 +214,7 @@ public class Pipelines {
 
     Option<Partitioner> insertPartitioner = OptionsResolver.getInsertPartitioner(conf);
     if (insertPartitioner.isPresent()) {
-      RowDataKeyGen rowDataKeyGen = RowDataKeyGen.instance(conf, rowType);
+      RowDataKeyGen rowDataKeyGen = RowDataKeyGens.instance(conf, rowType);
       dataStream = dataStream.partitionCustom(insertPartitioner.get(), rowDataKeyGen::getHoodieKey);
     }
 
@@ -250,7 +255,7 @@ public class Pipelines {
       DataStream<RowData> dataStream,
       boolean bounded,
       boolean overwrite) {
-    final boolean globalIndex = conf.getBoolean(FlinkOptions.INDEX_GLOBAL_ENABLED);
+    final boolean globalIndex = conf.get(FlinkOptions.INDEX_GLOBAL_ENABLED);
     if (overwrite || OptionsResolver.isBucketIndexType(conf)) {
       return rowDataToHoodieRecord(conf, rowType, dataStream);
     } else if (bounded && !globalIndex && OptionsResolver.isPartitionedTable(conf)) {
@@ -267,7 +272,7 @@ public class Pipelines {
       boolean bounded) {
     DataStream<HoodieFlinkInternalRow> dataStream1 = rowDataToHoodieRecord(conf, rowType, dataStream);
 
-    if (conf.getBoolean(FlinkOptions.INDEX_BOOTSTRAP_ENABLED) || bounded) {
+    if (conf.get(FlinkOptions.INDEX_BOOTSTRAP_ENABLED) || bounded) {
       dataStream1 = dataStream1
           .transform(
               "index_bootstrap",
@@ -289,7 +294,7 @@ public class Pipelines {
       Configuration conf,
       RowType rowType,
       DataStream<RowData> dataStream) {
-    final RowDataKeyGen rowDataKeyGen = RowDataKeyGen.instance(conf, rowType);
+    final RowDataKeyGen rowDataKeyGen = RowDataKeyGens.instance(conf, rowType);
     // shuffle by partition keys
     dataStream = dataStream
         .keyBy(rowDataKeyGen::getPartitionPath);
@@ -357,7 +362,7 @@ public class Pipelines {
                   TypeInformation.of(RowData.class),
                   BucketStreamWriteOperator.getFactory(conf, rowType))
               .uid(opUID("bucket_write", conf))
-              .setParallelism(conf.getInteger(FlinkOptions.WRITE_TASKS));
+              .setParallelism(conf.get(FlinkOptions.WRITE_TASKS));
         case CONSISTENT_HASHING:
           if (OptionsResolver.isInsertOverwrite(conf)) {
             // TODO support insert overwrite for consistent bucket index
@@ -369,35 +374,80 @@ public class Pipelines {
                   new HoodieFlinkInternalRowTypeInfo(rowType),
                   new ProcessOperator<>(new ConsistentBucketAssignFunction(conf)))
               .uid(opUID("consistent_bucket_assigner", conf))
-              .setParallelism(conf.getInteger(FlinkOptions.BUCKET_ASSIGN_TASKS))
+              .setParallelism(conf.get(FlinkOptions.BUCKET_ASSIGN_TASKS))
               .keyBy(HoodieFlinkInternalRow::getFileId)
               .transform(
                   opName("consistent_bucket_write", conf),
                   TypeInformation.of(RowData.class),
                   BucketStreamWriteOperator.getFactory(conf, rowType))
               .uid(opUID("consistent_bucket_write", conf))
-              .setParallelism(conf.getInteger(FlinkOptions.WRITE_TASKS));
+              .setParallelism(conf.get(FlinkOptions.WRITE_TASKS));
         default:
           throw new HoodieNotSupportedException("Unknown bucket index engine type: " + bucketIndexEngineType);
       }
     } else {
-      return dataStream
+      // uuid is used to generate operator id for the write operator, then the bucket assign operator can send
+      // operator event to the coordinator of the write operator based on the operator id.
+      // @see org.apache.flink.runtime.jobgraph.tasks.TaskOperatorEventGateway.
+      String writeOperatorUid = opUID("stream_write", conf);
+      DataStream<HoodieFlinkInternalRow> bucketAssignStream = createBucketAssignStream(dataStream, conf, rowType, writeOperatorUid);
+      boolean isStreamingIndexWriteEnabled = OptionsResolver.isStreamingIndexWriteEnabled(conf);
+      DataStream<RowData> writeDatastream =
+          bucketAssignStream
+              // shuffle by fileId(bucket id)
+              .keyBy(HoodieFlinkInternalRow::getFileId)
+              .transform(
+                  opName("stream_write", conf),
+                  isStreamingIndexWriteEnabled ? InternalTypeInfo.of(IndexRowUtils.INDEX_ROW_TYPE) : TypeInformation.of(RowData.class),
+                  StreamWriteOperator.getFactory(conf, rowType))
+              .uid(writeOperatorUid)
+              .setParallelism(conf.get(FlinkOptions.WRITE_TASKS));
+      if (isStreamingIndexWriteEnabled) {
+        // index writing pipeline
+        return writeDatastream
+            .partitionCustom(new RecordIndexPartitioner(conf), IndexRowUtils::getHoodieKey)
+            .transform(
+                opName("index_write", conf),
+                TypeInformation.of(RowData.class),
+                new IndexWriteOperator(conf, OperatorIDGenerator.fromUid(writeOperatorUid)))
+            .uid(opUID("index_write", conf))
+            .setParallelism(conf.get(FlinkOptions.INDEX_WRITE_TASKS));
+      } else {
+        return writeDatastream;
+      }
+    }
+  }
+
+  /**
+   * Creates a bucket assignment stream that routes records to appropriate file groups based on the index type.
+   *
+   * @param inputStream The input data stream of HoodieFlinkInternalRow records to be assigned to buckets
+   * @param conf        The configuration containing index and assignment settings
+   * @param rowType     The logical row type of the input data stream
+   * @return A DataStream of HoodieFlinkInternalRow records with bucket assignments
+   */
+  private static DataStream<HoodieFlinkInternalRow> createBucketAssignStream(
+      DataStream<HoodieFlinkInternalRow> inputStream, Configuration conf, RowType rowType, String writeOperatorUid) {
+    String assignerOperatorName = "bucket_assigner";
+    if (OptionsResolver.isRecordLevelIndex(conf)) {
+      return inputStream
+          .partitionCustom(new RecordIndexPartitioner(conf), row -> new HoodieKey(row.getRecordKey(), row.getPartitionPath()))
+          .transform(
+              assignerOperatorName,
+              new HoodieFlinkInternalRowTypeInfo(rowType),
+              new MiniBatchBucketAssignOperator(new MinibatchBucketAssignFunction(conf), OperatorIDGenerator.fromUid(writeOperatorUid)))
+          .uid(opUID(assignerOperatorName, conf))
+          .setParallelism(conf.get(FlinkOptions.BUCKET_ASSIGN_TASKS));
+    } else {
+      return inputStream
           // Key-by record key, to avoid multiple subtasks write to a bucket at the same time
           .keyBy(HoodieFlinkInternalRow::getRecordKey)
           .transform(
-              "bucket_assigner",
+              assignerOperatorName,
               new HoodieFlinkInternalRowTypeInfo(rowType),
               new KeyedProcessOperator<>(new BucketAssignFunction(conf)))
-          .uid(opUID("bucket_assigner", conf))
-          .setParallelism(conf.getInteger(FlinkOptions.BUCKET_ASSIGN_TASKS))
-          // shuffle by fileId(bucket id)
-          .keyBy(HoodieFlinkInternalRow::getFileId)
-          .transform(
-              opName("stream_write", conf),
-              TypeInformation.of(RowData.class),
-              StreamWriteOperator.getFactory(conf, rowType))
-          .uid(opUID("stream_write", conf))
-          .setParallelism(conf.getInteger(FlinkOptions.WRITE_TASKS));
+          .uid(opUID(assignerOperatorName, conf))
+          .setParallelism(conf.get(FlinkOptions.BUCKET_ASSIGN_TASKS));
     }
   }
 
@@ -431,7 +481,7 @@ public class Pipelines {
         .transform("compact_task",
             TypeInformation.of(CompactionCommitEvent.class),
             new CompactOperator(conf))
-        .setParallelism(conf.getInteger(FlinkOptions.COMPACTION_TASKS))
+        .setParallelism(conf.get(FlinkOptions.COMPACTION_TASKS))
         .addSink(new CompactionCommitSink(conf))
         .name("compact_commit")
         .setParallelism(1); // compaction commit should be singleton
@@ -508,15 +558,15 @@ public class Pipelines {
   }
 
   public static String getTablePath(Configuration conf) {
-    String databaseName = conf.getString(FlinkOptions.DATABASE_NAME);
-    return StringUtils.isNullOrEmpty(databaseName) ? conf.getString(FlinkOptions.TABLE_NAME)
-        : databaseName + "." + conf.getString(FlinkOptions.TABLE_NAME);
+    String databaseName = conf.get(FlinkOptions.DATABASE_NAME);
+    return StringUtils.isNullOrEmpty(databaseName) ? conf.get(FlinkOptions.TABLE_NAME)
+        : databaseName + "." + conf.get(FlinkOptions.TABLE_NAME);
   }
 
   /**
    * Dummy sink that does nothing.
    */
-  public static class DummySink implements SinkFunction<RowData> {
+  public static class DummySink implements SinkFunctionAdapter<RowData> {
     private static final long serialVersionUID = 1L;
     public static DummySink INSTANCE = new DummySink();
   }

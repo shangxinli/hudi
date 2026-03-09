@@ -33,12 +33,12 @@ import org.apache.hudi.utilities.schema.SchemaProvider;
 import org.apache.hudi.utilities.sources.processor.JsonKafkaSourcePostProcessor;
 import org.apache.hudi.utilities.sources.processor.maxwell.MaxwellJsonKafkaSourcePostProcessor;
 import org.apache.hudi.utilities.streamer.SourceFormatAdapter;
+import org.apache.hudi.utilities.testutils.KafkaTestUtils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.streaming.kafka010.KafkaTestUtils;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -240,8 +240,8 @@ public class TestJsonKafkaSourcePostProcessor extends SparkClientFunctionalTestH
     });
 
     // test delete
-    props.setProperty(JsonKafkaPostProcessorConfig.PRECOMBINE_FIELD_TYPE.key(), "DATE_STRING");
-    props.setProperty(JsonKafkaPostProcessorConfig.PRECOMBINE_FIELD_FORMAT.key(), "yyyy-MM-dd HH:mm:ss");
+    props.setProperty(JsonKafkaPostProcessorConfig.ORDERING_FIELDS_TYPE.key(), "DATE_STRING");
+    props.setProperty(JsonKafkaPostProcessorConfig.ORDERING_FIELDS_FORMAT.key(), "yyyy-MM-dd HH:mm:ss");
     props.setProperty(HoodieWriteConfig.PRECOMBINE_FIELD_NAME.key(), "update_time");
 
     JavaRDD<String> inputDelete = jsc().parallelize(Collections.singletonList(hudiMaxwell01Delete));
@@ -262,7 +262,7 @@ public class TestJsonKafkaSourcePostProcessor extends SparkClientFunctionalTestH
         });
 
     // test preCombine field is not time
-    props.setProperty(JsonKafkaPostProcessorConfig.PRECOMBINE_FIELD_TYPE.key(), "NON_TIMESTAMP");
+    props.setProperty(JsonKafkaPostProcessorConfig.ORDERING_FIELDS_TYPE.key(), "NON_TIMESTAMP");
     props.setProperty(HoodieWriteConfig.PRECOMBINE_FIELD_NAME.key(), "id");
 
     JavaRDD<String> inputDelete2 = jsc().parallelize(Collections.singletonList(hudiMaxwell01Delete));

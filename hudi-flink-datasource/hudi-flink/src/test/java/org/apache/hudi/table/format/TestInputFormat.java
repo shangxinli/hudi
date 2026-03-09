@@ -27,6 +27,7 @@ import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload;
 import org.apache.hudi.common.model.PartialUpdateAvroPayload;
+import org.apache.hudi.common.model.WriteConcurrencyMode;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
@@ -34,8 +35,12 @@ import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
+import org.apache.hudi.index.HoodieIndex;
+import org.apache.hudi.io.FileGroupReaderBasedMergeHandle;
+import org.apache.hudi.io.HoodieWriteMergeHandle;
 import org.apache.hudi.source.IncrementalInputSplits;
 import org.apache.hudi.source.prune.PartitionPruners;
 import org.apache.hudi.storage.StoragePath;
@@ -45,8 +50,8 @@ import org.apache.hudi.table.format.cdc.CdcInputFormat;
 import org.apache.hudi.table.format.cow.CopyOnWriteInputFormat;
 import org.apache.hudi.table.format.mor.MergeOnReadInputFormat;
 import org.apache.hudi.table.format.mor.MergeOnReadInputSplit;
-import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.FlinkWriteClients;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.SerializableSchema;
 import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.TestConfigurations;
@@ -112,9 +117,12 @@ public class TestInputFormat {
 
   void beforeEach(HoodieTableType tableType, Map<String, String> options) throws IOException {
     conf = TestConfigurations.getDefaultConf(tempFile.getAbsolutePath());
-    conf.setString(FlinkOptions.TABLE_TYPE, tableType.name());
+    // all test cases here expect former default values for record key and ordering fields
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, "uuid");
+    conf.set(FlinkOptions.ORDERING_FIELDS, "ts");
+    conf.set(FlinkOptions.TABLE_TYPE, tableType.name());
     if (!conf.contains(FlinkOptions.COMPACTION_ASYNC_ENABLED)) {
-      conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, false); // by default close the async compaction
+      conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false); // by default close the async compaction
     }
     options.forEach((key, value) -> conf.setString(key, value));
 
@@ -167,8 +175,8 @@ public class TestInputFormat {
     beforeEach(HoodieTableType.MERGE_ON_READ);
 
     // write base first with compaction
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
 
     InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
@@ -180,7 +188,7 @@ public class TestInputFormat {
     assertThat(actual, is(expected));
 
     // write another commit using logs and read again
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
     TestData.writeData(TestData.DATA_SET_UPDATE_INSERT, conf);
 
     // write another commit using logs with separate partition
@@ -220,12 +228,12 @@ public class TestInputFormat {
     beforeEach(HoodieTableType.MERGE_ON_READ, options);
 
     // write base first with compaction.
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
 
     // write another commit using logs and read again.
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
     TestData.writeData(TestData.DATA_SET_UPDATE_DELETE, conf);
 
     InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
@@ -273,12 +281,12 @@ public class TestInputFormat {
     beforeEach(HoodieTableType.MERGE_ON_READ, options);
 
     // write base first with compaction.
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     TestData.writeData(TestData.DATA_SET_SINGLE_INSERT, conf);
 
     // write another commit using logs and read again.
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, compact);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, compact);
     TestData.writeData(TestData.DATA_SET_DISORDER_UPDATE_DELETE, conf);
 
     InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
@@ -462,8 +470,8 @@ public class TestInputFormat {
     org.apache.hadoop.conf.Configuration hadoopConf = HadoopConfigurations.getHadoopConf(conf);
 
     // write base first with compaction
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
 
     InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat(true);
@@ -489,12 +497,12 @@ public class TestInputFormat {
     assertThat(actual1, is(expected1));
 
     // write another commit using logs and read again
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
     TestData.writeData(TestData.DATA_SET_UPDATE_INSERT, conf);
 
     // read from the compaction commit
     String secondCommit = TestUtils.getNthCompleteInstant(metaClient.getBasePath(), 0, HoodieTimeline.COMMIT_ACTION);
-    conf.setString(FlinkOptions.READ_START_COMMIT, secondCommit);
+    conf.set(FlinkOptions.READ_START_COMMIT, secondCommit);
 
     IncrementalInputSplits.Result splits2 = incrementalInputSplits.inputSplits(metaClient, null, false);
     assertFalse(splits2.isEmpty());
@@ -525,10 +533,10 @@ public class TestInputFormat {
     beforeEach(HoodieTableType.COPY_ON_WRITE);
 
     // write base first with clustering
-    conf.setString(FlinkOptions.OPERATION, "insert");
-    conf.setBoolean(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED, true);
-    conf.setBoolean(FlinkOptions.CLUSTERING_ASYNC_ENABLED, true);
-    conf.setInteger(FlinkOptions.CLUSTERING_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.OPERATION, "insert");
+    conf.set(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED, true);
+    conf.set(FlinkOptions.CLUSTERING_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.CLUSTERING_DELTA_COMMITS, 1);
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
 
     InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat(true);
@@ -554,12 +562,12 @@ public class TestInputFormat {
     assertThat(actual1, is(expected1));
 
     // write another commit and read again
-    conf.setBoolean(FlinkOptions.CLUSTERING_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.CLUSTERING_ASYNC_ENABLED, false);
     TestData.writeData(TestData.DATA_SET_UPDATE_INSERT, conf);
 
     // read from the clustering commit
     String secondCommit = TestUtils.getNthCompleteInstant(metaClient.getBasePath(), 0, HoodieTimeline.REPLACE_COMMIT_ACTION);
-    conf.setString(FlinkOptions.READ_START_COMMIT, secondCommit);
+    conf.set(FlinkOptions.READ_START_COMMIT, secondCommit);
 
     IncrementalInputSplits.Result splits2 = incrementalInputSplits.inputSplits(metaClient, null, false);
     assertFalse(splits2.isEmpty());
@@ -570,7 +578,7 @@ public class TestInputFormat {
 
     // write another commit with separate partition
     // so the file group has only base files
-    conf.setBoolean(FlinkOptions.CLUSTERING_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.CLUSTERING_ASYNC_ENABLED, true);
     TestData.writeData(TestData.DATA_SET_INSERT_SEPARATE_PARTITION, conf);
 
     // refresh the input format
@@ -638,7 +646,7 @@ public class TestInputFormat {
 
     // timeline: c1, c2.inflight, c3.inflight, c4
     // -> c1
-    conf.setString(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
+    conf.set(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
     IncrementalInputSplits.Result splits2 = incrementalInputSplits.inputSplits(metaClient, null, false);
     assertFalse(splits2.isEmpty());
     List<RowData> result2 = readData(inputFormat, splits2.getInputSplits().toArray(new MergeOnReadInputSplit[0]));
@@ -713,7 +721,7 @@ public class TestInputFormat {
 
     // read from the latest commit
     String secondCommit = TestUtils.getNthCompleteInstant(metaClient.getBasePath(), 1, HoodieTimeline.COMMIT_ACTION);
-    conf.setString(FlinkOptions.READ_START_COMMIT, secondCommit);
+    conf.set(FlinkOptions.READ_START_COMMIT, secondCommit);
 
     IncrementalInputSplits.Result splits2 = incrementalInputSplits.inputSplits(metaClient, null, false);
     assertFalse(splits2.isEmpty());
@@ -733,7 +741,7 @@ public class TestInputFormat {
     // prune to only be with partition 'par1'
     FieldReferenceExpression partRef = new FieldReferenceExpression("partition", DataTypes.STRING(), 4, 4);
     ValueLiteralExpression partLiteral = new ValueLiteralExpression("par1", DataTypes.STRING().notNull());
-    CallExpression partFilter = new CallExpression(
+    CallExpression partFilter = CallExpression.permanent(
         BuiltInFunctionDefinitions.EQUALS,
         Arrays.asList(partRef, partLiteral),
         DataTypes.BOOLEAN());
@@ -830,7 +838,7 @@ public class TestInputFormat {
     assertThat(commits.size(), is(3));
 
     // only the start commit
-    conf.setString(FlinkOptions.READ_START_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat1 = this.tableSource.getInputFormat();
     assertThat(inputFormat1, instanceOf(MergeOnReadInputFormat.class));
@@ -840,7 +848,7 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual1, expected1);
 
     // only the start commit: earliest
-    conf.setString(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
+    conf.set(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat2 = this.tableSource.getInputFormat();
     assertThat(inputFormat2, instanceOf(MergeOnReadInputFormat.class));
@@ -850,8 +858,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual2, expected2);
 
     // start and end commit: [start commit, end commit]
-    conf.setString(FlinkOptions.READ_START_COMMIT, commits.get(0));
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, commits.get(0));
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat3 = this.tableSource.getInputFormat();
     assertThat(inputFormat3, instanceOf(MergeOnReadInputFormat.class));
@@ -862,7 +870,7 @@ public class TestInputFormat {
 
     // only the end commit: point in time query
     conf.removeConfig(FlinkOptions.READ_START_COMMIT);
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat4 = this.tableSource.getInputFormat();
     assertThat(inputFormat4, instanceOf(MergeOnReadInputFormat.class));
@@ -872,8 +880,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual4, expected4);
 
     // start and end commit: start commit out of range
-    conf.setString(FlinkOptions.READ_START_COMMIT, "000");
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, "000");
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat5 = this.tableSource.getInputFormat();
     assertThat(inputFormat4, instanceOf(MergeOnReadInputFormat.class));
@@ -883,8 +891,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual5, expected5);
 
     // start and end commit: both are out of range
-    conf.setString(FlinkOptions.READ_START_COMMIT, "001");
-    conf.setString(FlinkOptions.READ_END_COMMIT, "002");
+    conf.set(FlinkOptions.READ_START_COMMIT, "001");
+    conf.set(FlinkOptions.READ_END_COMMIT, "002");
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat6 = this.tableSource.getInputFormat();
 
@@ -973,7 +981,7 @@ public class TestInputFormat {
 
   private void testReadChangelogInternal(List<String> commits) throws IOException {
     // only the start commit
-    conf.setString(FlinkOptions.READ_START_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat1 = this.tableSource.getInputFormat();
     assertThat(inputFormat1, instanceOf(CdcInputFormat.class));
@@ -982,7 +990,7 @@ public class TestInputFormat {
     final List<RowData> expected1 = TestData.dataSetUpsert(2, 1, 2, 1);
     TestData.assertRowDataEquals(actual1, expected1);
     // only the start commit: earliest
-    conf.setString(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
+    conf.set(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat2 = this.tableSource.getInputFormat();
     assertThat(inputFormat2, instanceOf(CdcInputFormat.class));
@@ -992,8 +1000,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual2, expected2);
 
     // start and end commit: [start commit, end commit]
-    conf.setString(FlinkOptions.READ_START_COMMIT, commits.get(0));
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, commits.get(0));
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat3 = this.tableSource.getInputFormat();
     assertThat(inputFormat3, instanceOf(CdcInputFormat.class));
@@ -1007,7 +1015,7 @@ public class TestInputFormat {
 
     // only the end commit: point in time query
     conf.removeConfig(FlinkOptions.READ_START_COMMIT);
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat4 = this.tableSource.getInputFormat();
     assertThat(inputFormat4, instanceOf(CdcInputFormat.class));
@@ -1017,8 +1025,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual4, expected4);
 
     // start and end commit: start commit out of range
-    conf.setString(FlinkOptions.READ_START_COMMIT, "000");
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, "000");
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat5 = this.tableSource.getInputFormat();
     assertThat(inputFormat5, instanceOf(CdcInputFormat.class));
@@ -1029,8 +1037,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual5, expected3);
 
     // start and end commit: both are out of range
-    conf.setString(FlinkOptions.READ_START_COMMIT, "001");
-    conf.setString(FlinkOptions.READ_END_COMMIT, "002");
+    conf.set(FlinkOptions.READ_START_COMMIT, "001");
+    conf.set(FlinkOptions.READ_END_COMMIT, "002");
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat6 = this.tableSource.getInputFormat();
 
@@ -1045,8 +1053,8 @@ public class TestInputFormat {
     beforeEach(HoodieTableType.MERGE_ON_READ, options);
 
     // write base file first with compaction.
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, true);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     TestData.writeData(TestData.DATA_SET_DISORDER_INSERT, conf);
     InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
     final String baseResult = TestData.rowDataToString(readData(inputFormat));
@@ -1054,7 +1062,7 @@ public class TestInputFormat {
     assertThat(baseResult, is(expected));
 
     // write another commit using logs and read again.
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
     TestData.writeData(TestData.DATA_SET_SINGLE_INSERT, conf);
     this.tableSource.reset();
     inputFormat = this.tableSource.getInputFormat();
@@ -1094,6 +1102,29 @@ public class TestInputFormat {
   }
 
   @Test
+  void testMergeRecordWithUpdateBefore() throws Exception {
+    Map<String, String> options = new HashMap<>();
+    options.put(FlinkOptions.CHANGELOG_ENABLED.key(), "true");
+    beforeEach(HoodieTableType.COPY_ON_WRITE, options);
+
+    // write first batch with all insert data
+    TestData.writeData(TestData.DATA_SET_INSERT, conf);
+    // write second batch with UPDATE_BEFORE record, send UPDATE_BEFORE for `id1`
+    TestData.writeData(TestData.DATA_SET_UPDATE_BEFORE, conf);
+    InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
+    final String baseResult = TestData.rowDataToString(readData(inputFormat));
+    String expected = "["
+        + "+I[id2, Stephen, 33, 1970-01-01T00:00:00.002, par1], "
+        + "+I[id3, Julian, 53, 1970-01-01T00:00:00.003, par2], "
+        + "+I[id4, Fabian, 31, 1970-01-01T00:00:00.004, par2], "
+        + "+I[id5, Sophia, 18, 1970-01-01T00:00:00.005, par3], "
+        + "+I[id6, Emma, 20, 1970-01-01T00:00:00.006, par3], "
+        + "+I[id7, Bob, 44, 1970-01-01T00:00:00.007, par4], "
+        + "+I[id8, Han, 56, 1970-01-01T00:00:00.008, par4]]";
+    assertThat(baseResult, is(expected));
+  }
+
+  @Test
   void testReadArchivedCommitsIncrementally() throws Exception {
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.QUERY_TYPE.key(), FlinkOptions.QUERY_TYPE_INCREMENTAL);
@@ -1128,8 +1159,8 @@ public class TestInputFormat {
     assertThat(archivedCommits.size(), is(6));
 
     // start and end commit: both are archived and cleaned
-    conf.setString(FlinkOptions.READ_START_COMMIT, archivedCommits.get(0));
-    conf.setString(FlinkOptions.READ_END_COMMIT, archivedCommits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, archivedCommits.get(0));
+    conf.set(FlinkOptions.READ_END_COMMIT, archivedCommits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat1 = this.tableSource.getInputFormat();
     assertThat(inputFormat1, instanceOf(MergeOnReadInputFormat.class));
@@ -1139,7 +1170,7 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual1, expected1);
 
     // only the start commit: is archived and cleaned
-    conf.setString(FlinkOptions.READ_START_COMMIT, archivedCommits.get(1));
+    conf.set(FlinkOptions.READ_START_COMMIT, archivedCommits.get(1));
     conf.removeConfig(FlinkOptions.READ_END_COMMIT);
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat2 = this.tableSource.getInputFormat();
@@ -1152,7 +1183,7 @@ public class TestInputFormat {
 
     // only the end commit: is archived and cleaned
     conf.removeConfig(FlinkOptions.READ_START_COMMIT);
-    conf.setString(FlinkOptions.READ_END_COMMIT, archivedCommits.get(1));
+    conf.set(FlinkOptions.READ_END_COMMIT, archivedCommits.get(1));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat3 = this.tableSource.getInputFormat();
     assertThat(inputFormat3, instanceOf(MergeOnReadInputFormat.class));
@@ -1162,8 +1193,8 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(actual3, expected3);
 
     // start and end commit: start is archived and cleaned, end is active and cleaned
-    conf.setString(FlinkOptions.READ_START_COMMIT, archivedCommits.get(1));
-    conf.setString(FlinkOptions.READ_END_COMMIT, commits.get(0));
+    conf.set(FlinkOptions.READ_START_COMMIT, archivedCommits.get(1));
+    conf.set(FlinkOptions.READ_END_COMMIT, commits.get(0));
     this.tableSource = getTableSource(conf);
     InputFormat<RowData, ?> inputFormat4 = this.tableSource.getInputFormat();
     // assertThat(inputFormat4, instanceOf(MergeOnReadInputFormat.class));
@@ -1179,7 +1210,7 @@ public class TestInputFormat {
   void testReadWithWiderSchema(HoodieTableType tableType) throws Exception {
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.SOURCE_AVRO_SCHEMA.key(),
-        AvroSchemaConverter.convertToSchema(TestConfigurations.ROW_TYPE_WIDER).toString());
+        HoodieSchemaConverter.convertToSchema(TestConfigurations.ROW_TYPE_WIDER).toString());
     beforeEach(tableType, options);
 
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
@@ -1194,8 +1225,10 @@ public class TestInputFormat {
     conf.set(FlinkOptions.PATH, tempFile.getAbsolutePath());
     conf.set(FlinkOptions.TABLE_NAME, "TestHoodieTable");
     conf.set(FlinkOptions.TABLE_TYPE, HoodieTableType.MERGE_ON_READ.name());
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, "uuid");
+    conf.set(FlinkOptions.ORDERING_FIELDS, "ts");
     conf.set(FlinkOptions.PARTITION_PATH_FIELD, "partition");
-    conf.setString(FlinkOptions.SOURCE_AVRO_SCHEMA.key(), AvroSchemaConverter.convertToSchema(TestConfigurations.ROW_TYPE_DECIMAL_ORDERING).toString());
+    conf.setString(FlinkOptions.SOURCE_AVRO_SCHEMA.key(), HoodieSchemaConverter.convertToSchema(TestConfigurations.ROW_TYPE_DECIMAL_ORDERING).toString());
     conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false); // by default close the async compaction
     StreamerUtil.initTableIfNotExists(conf);
 
@@ -1276,11 +1309,32 @@ public class TestInputFormat {
         .path(FilePathUtils.toFlinkPath(metaClient.getBasePath()))
         .skipCompaction(skipCompaction)
         .build();
-    conf.setString(FlinkOptions.READ_END_COMMIT, newCompletionTime);
+    conf.set(FlinkOptions.READ_END_COMMIT, newCompletionTime);
     IncrementalInputSplits.Result splits2 = incrementalInputSplits.inputSplits(metaClient, null, false);
     assertFalse(splits2.isEmpty());
     List<RowData> result2 = readData(inputFormat, splits2.getInputSplits().toArray(new MergeOnReadInputSplit[0]));
     TestData.assertRowDataEquals(result2, TestData.dataSetInsert(1, 2));
+  }
+
+  @Test
+  void testIncReadWithNBCCAndSingleBucketNum() throws Exception {
+    Map<String, String> options = new HashMap<>();
+    // file group id for the same bucket id among different partitions are same with NBCC mode
+    options.put(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(), WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL.name());
+    options.put(FlinkOptions.INDEX_TYPE.key(), HoodieIndex.IndexType.BUCKET.name());
+    options.put(FlinkOptions.BUCKET_INDEX_NUM_BUCKETS.key(), "1");
+    beforeEach(HoodieTableType.MERGE_ON_READ, options);
+
+    TestData.writeData(TestData.DATA_SET_INSERT, conf);
+
+    conf.set(FlinkOptions.READ_START_COMMIT, "000");
+    conf.set(FlinkOptions.QUERY_TYPE, FlinkOptions.QUERY_TYPE_INCREMENTAL);
+    this.tableSource = getTableSource(conf);
+    InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
+    assertThat(inputFormat, instanceOf(MergeOnReadInputFormat.class));
+
+    List<RowData> result = readData(inputFormat);
+    TestData.assertRowDataEquals(result, TestData.DATA_SET_INSERT);
   }
 
   @ParameterizedTest
@@ -1379,12 +1433,18 @@ public class TestInputFormat {
     TestData.assertRowDataEquals(result, TestData.DATA_SET_INSERT);
   }
 
-  @Test
-  public void testWriteCowWithPartialUpdate() throws Exception {
+  @ParameterizedTest
+  @MethodSource("partialUpdateParams")
+  public void testWriteCowWithPartialUpdate(HoodieTableVersion tableVersion, String mergeHandleClass, boolean usePayloadConf) throws Exception {
     Map<String, String> options = new HashMap<>();
+    options.put(HoodieWriteConfig.MERGE_HANDLE_CLASS_NAME.key(), mergeHandleClass);
+    options.put(FlinkOptions.WRITE_TABLE_VERSION.key(), tableVersion.versionCode() + "");
     // new config with merge classes and merge mode
-    options.put(FlinkOptions.RECORD_MERGE_MODE.key(), RecordMergeMode.CUSTOM.name());
-    options.put(FlinkOptions.RECORD_MERGER_IMPLS.key(), PartialUpdateFlinkRecordMerger.class.getName());
+    if (usePayloadConf) {
+      options.put(FlinkOptions.PAYLOAD_CLASS_NAME.key(), PartialUpdateAvroPayload.class.getName());
+    } else {
+      options.put(FlinkOptions.RECORD_MERGER_IMPLS.key(), PartialUpdateFlinkRecordMerger.class.getName());
+    }
     beforeEach(HoodieTableType.COPY_ON_WRITE, options);
 
     // first insert
@@ -1410,6 +1470,23 @@ public class TestInputFormat {
   // -------------------------------------------------------------------------
   //  Utilities
   // -------------------------------------------------------------------------
+
+  /**
+   * Return test params => (tableVersion, writeMergeHandleClass, usePayloadConf).
+   */
+  private static Stream<Arguments> partialUpdateParams() {
+    Object[][] data =
+        new Object[][] {
+            {HoodieTableVersion.NINE, FileGroupReaderBasedMergeHandle.class.getName(), true},
+            {HoodieTableVersion.NINE, FileGroupReaderBasedMergeHandle.class.getName(), false},
+            {HoodieTableVersion.NINE, HoodieWriteMergeHandle.class.getName(), true},
+            {HoodieTableVersion.NINE, HoodieWriteMergeHandle.class.getName(), false},
+            {HoodieTableVersion.EIGHT, FileGroupReaderBasedMergeHandle.class.getName(), true},
+            {HoodieTableVersion.EIGHT, FileGroupReaderBasedMergeHandle.class.getName(), false},
+            {HoodieTableVersion.EIGHT, HoodieWriteMergeHandle.class.getName(), true},
+            {HoodieTableVersion.EIGHT, HoodieWriteMergeHandle.class.getName(), false}};
+    return Stream.of(data).map(Arguments::of);
+  }
 
   /**
    * Return test params => (preCombining, changelog mode).

@@ -18,15 +18,15 @@
 
 package org.apache.hudi.sink.clustering;
 
+import org.apache.hudi.adapter.AbstractRichFunctionAdapter;
+import org.apache.hudi.adapter.SourceFunctionAdapter;
 import org.apache.hudi.avro.model.HoodieClusteringGroup;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.common.model.ClusteringGroupInfo;
 import org.apache.hudi.common.model.ClusteringOperation;
 import org.apache.hudi.util.StreamerUtil;
 
-import org.apache.flink.api.common.functions.AbstractRichFunction;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,13 +40,13 @@ import org.slf4j.LoggerFactory;
  *
  * <ul>
  *   <li>If the timeline has no inflight instants,
- *   use {@link org.apache.hudi.common.table.timeline.HoodieActiveTimeline#createNewInstantTime() as the instant time;</li>
+ *   use {@link org.apache.hudi.common.table.timeline.HoodieActiveTimeline#createNewInstantTime()} as the instant time;</li>
  *   <li>If the timeline has inflight instants,
  *   use the median instant time between [last complete instant time, earliest inflight instant time]
  *   as the instant time.</li>
  * </ul>
  */
-public class ClusteringPlanSourceFunction extends AbstractRichFunction implements SourceFunction<ClusteringPlanEvent> {
+public class ClusteringPlanSourceFunction extends AbstractRichFunctionAdapter implements SourceFunctionAdapter<ClusteringPlanEvent> {
 
   protected static final Logger LOG = LoggerFactory.getLogger(ClusteringPlanSourceFunction.class);
 
@@ -82,7 +82,7 @@ public class ClusteringPlanSourceFunction extends AbstractRichFunction implement
         sourceContext.collect(new ClusteringPlanEvent(this.clusteringInstantTime, ClusteringGroupInfo.create(clusteringGroup), clusteringPlan.getStrategy().getStrategyParams()));
       }
     } else {
-      LOG.warn(clusteringInstantTime + " not found in pending clustering instants.");
+      LOG.warn("{} not found in pending clustering instants.", clusteringInstantTime);
     }
   }
 

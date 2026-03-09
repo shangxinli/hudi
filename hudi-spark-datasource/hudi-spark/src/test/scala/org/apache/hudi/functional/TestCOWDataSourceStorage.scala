@@ -24,13 +24,15 @@ import org.apache.hudi.client.validator.{SqlQueryEqualityPreCommitValidator, Sql
 import org.apache.hudi.common.config.HoodieMetadataConfig
 import org.apache.hudi.common.config.TimestampKeyGeneratorConfig.{TIMESTAMP_INPUT_DATE_FORMAT, TIMESTAMP_OUTPUT_DATE_FORMAT, TIMESTAMP_TYPE_FIELD}
 import org.apache.hudi.common.model.WriteOperationType
+import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.table.timeline.{HoodieInstant, HoodieTimeline}
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator
-import org.apache.hudi.common.testutils.RawTripTestPayload.recordsToStrings
+import org.apache.hudi.common.testutils.HoodieTestDataGenerator.recordsToStrings
+import org.apache.hudi.common.testutils.HoodieTestUtils
 import org.apache.hudi.config.{HoodiePreCommitValidatorConfig, HoodieWriteConfig}
 import org.apache.hudi.exception.{HoodieUpsertException, HoodieValidationException}
-import org.apache.hudi.hadoop.fs.HadoopFSUtils
 import org.apache.hudi.keygen.{NonpartitionedKeyGenerator, TimestampBasedKeyGenerator}
+import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.testutils.{DataSourceTestUtils, SparkClientFunctionalTestHarness}
 import org.apache.hudi.testutils.HoodieClientTestUtils.createMetaClient
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness.getSparkSqlConf
@@ -59,7 +61,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
     "hoodie.delete.shuffle.parallelism" -> "1",
     DataSourceWriteOptions.RECORDKEY_FIELD.key -> "_row_key",
     DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "partition",
-    DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "timestamp",
+    HoodieTableConfig.ORDERING_FIELDS.key -> "timestamp",
     HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
     DataSourceWriteOptions.HIVE_STYLE_PARTITIONING.key -> "false"
   )
@@ -85,6 +87,8 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> recordKeys,
       HoodieWriteConfig.SCHEMA_ALLOW_AUTO_EVOLUTION_COLUMN_DROP.key -> "true")
 
+    val readOptions = Map(HoodieMetadataConfig.ENABLE.key() -> String.valueOf(isMetadataEnabled))
+
     val isTimestampBasedKeyGen: Boolean = classOf[TimestampBasedKeyGenerator].getName.equals(keyGenClass)
     if (isTimestampBasedKeyGen) {
       options += DataSourceWriteOptions.RECORDKEY_FIELD.key() -> "_row_key"
@@ -93,7 +97,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       options += TIMESTAMP_OUTPUT_DATE_FORMAT.key -> "yyyyMMdd"
     }
     val dataGen = new HoodieTestDataGenerator(0xDEED)
-    val fs = HadoopFSUtils.getFs(basePath, spark.sparkContext.hadoopConfiguration)
+    val storage = HoodieTestUtils.getStorage(new StoragePath(basePath))
     // Insert Operation
     val records0 = recordsToStrings(dataGen.generateInserts("000", 100)).asScala.toList
     val inputDF0 = spark.read.json(spark.sparkContext.parallelize(records0, 2))
@@ -103,12 +107,12 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       .mode(SaveMode.Overwrite)
       .save(basePath)
 
-    val completionTime1 = DataSourceTestUtils.latestCommitCompletionTime(fs, basePath)
-    assertTrue(HoodieDataSourceHelpers.hasNewCommits(fs, basePath, "000"))
+    val completionTime1 = DataSourceTestUtils.latestCommitCompletionTime(storage, basePath)
+    assertTrue(HoodieDataSourceHelpers.hasNewCommits(storage, basePath, "000"))
 
     // Snapshot query
     val snapshotDF1 = spark.read.format("org.apache.hudi")
-      .option(HoodieMetadataConfig.ENABLE.key, isMetadataEnabled)
+      .options(readOptions)
       .load(basePath)
     assertEquals(100, snapshotDF1.count())
 
@@ -134,8 +138,9 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       .mode(SaveMode.Append)
       .save(basePath)
 
+    val completionTime2 = DataSourceTestUtils.latestCommitCompletionTime(storage, basePath)
     val snapshotDF2 = spark.read.format("hudi")
-      .option(HoodieMetadataConfig.ENABLE.key, isMetadataEnabled)
+      .options(readOptions)
       .load(basePath)
     assertEquals(100, snapshotDF2.count())
     assertEquals(updatedVerificationVal, snapshotDF2.filter(col("_row_key") === verificationRowKey).select(verificationCol).first.getString(0))
@@ -168,24 +173,24 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       .mode(SaveMode.Append)
       .save(basePath)
 
-    val commitInstantTime3 = HoodieDataSourceHelpers.latestCommit(fs, basePath)
-    val completionTime3 = DataSourceTestUtils.latestCommitCompletionTime(fs, basePath)
-    assertEquals(3, HoodieDataSourceHelpers.listCommitsSince(fs, basePath, "000").size())
+    val commitInstantTime3 = HoodieDataSourceHelpers.latestCommit(storage, basePath)
+    assertEquals(3, HoodieDataSourceHelpers.listCommitsSince(storage, basePath, "000").size())
 
     // Snapshot Query
     val snapshotDF3 = spark.read.format("org.apache.hudi")
-      .option(HoodieMetadataConfig.ENABLE.key, isMetadataEnabled)
+      .options(readOptions)
       .load(basePath)
     assertEquals(100, snapshotDF3.count()) // still 100, since we only updated
 
     // Read Incremental Query
     // we have 2 commits, try pulling the first commit (which is not the latest)
-    val firstCommit = HoodieDataSourceHelpers.listCommitsSince(fs, basePath, "000").get(0)
+    val firstCommit = HoodieDataSourceHelpers.listCommitsSince(storage, basePath, "000").get(0)
     // Setting HoodieROTablePathFilter here to test whether pathFilter can filter out correctly for IncrementalRelation
     spark.sparkContext.hadoopConfiguration.set("mapreduce.input.pathFilter.class", "org.apache.hudi.hadoop.HoodieROTablePathFilter")
     val hoodieIncViewDF1 = spark.read.format("org.apache.hudi")
+      .options(readOptions)
       .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
-      .option(DataSourceReadOptions.START_COMMIT.key, completionTime1)
+      .option(DataSourceReadOptions.START_COMMIT.key, "000")
       .option(DataSourceReadOptions.END_COMMIT.key, completionTime1)
       .load(basePath)
     assertEquals(100, hoodieIncViewDF1.count()) // 100 initial inserts must be pulled
@@ -196,6 +201,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
 
     // Test incremental query has no instant in range
     val emptyIncDF = spark.read.format("org.apache.hudi")
+      .options(readOptions)
       .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
       .option(DataSourceReadOptions.START_COMMIT.key, "000")
       .option(DataSourceReadOptions.END_COMMIT.key, "002")
@@ -212,8 +218,9 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
 
     // pull the latest commit
     val hoodieIncViewDF2 = spark.read.format("org.apache.hudi")
+      .options(readOptions)
       .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
-      .option(DataSourceReadOptions.START_COMMIT.key, completionTime3)
+      .option(DataSourceReadOptions.START_COMMIT.key, completionTime2)
       .load(basePath)
 
     assertEquals(uniqueKeyCnt, hoodieIncViewDF2.count()) // 100 records must be pulled
@@ -223,16 +230,18 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
 
     // pull the latest commit within certain partitions
     val hoodieIncViewDF3 = spark.read.format("org.apache.hudi")
+      .options(readOptions)
       .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
-      .option(DataSourceReadOptions.START_COMMIT.key, completionTime3)
+      .option(DataSourceReadOptions.START_COMMIT.key, completionTime2)
       .option(DataSourceReadOptions.INCR_PATH_GLOB.key, if (isTimestampBasedKeyGen) "/2016*/*" else "/2016/*/*/*")
       .load(basePath)
     assertEquals(hoodieIncViewDF2
       .filter(col("_hoodie_partition_path").startsWith("2016")).count(), hoodieIncViewDF3.count())
 
     val timeTravelDF = spark.read.format("org.apache.hudi")
+      .options(readOptions)
       .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
-      .option(DataSourceReadOptions.START_COMMIT.key, completionTime1)
+      .option(DataSourceReadOptions.START_COMMIT.key, "000")
       .option(DataSourceReadOptions.END_COMMIT.key, completionTime1)
       .load(basePath)
     assertEquals(100, timeTravelDF.count()) // 100 initial inserts must be pulled
@@ -317,7 +326,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
     }
 
     val dataGen = new HoodieTestDataGenerator(0xDEED)
-    val fs = HadoopFSUtils.getFs(basePath, spark.sparkContext.hadoopConfiguration)
+    val storage = HoodieTestUtils.getStorage(new StoragePath(basePath))
     val records = recordsToStrings(dataGen.generateInserts("001", 100)).asScala.toList
 
     // First commit, new partition, no existing table schema
@@ -329,7 +338,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       .options(options)
       .mode(SaveMode.Overwrite)
       .save(basePath)
-    assertEquals(1, HoodieDataSourceHelpers.listCommitsSince(fs, basePath, "000").size())
+    assertEquals(1, HoodieDataSourceHelpers.listCommitsSince(storage, basePath, "000").size())
 
     // Second commit, new partition, has existing table schema
     // Validation should succeed
@@ -344,7 +353,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
       .options(options)
       .mode(SaveMode.Append)
       .save(basePath)
-    assertEquals(2, HoodieDataSourceHelpers.listCommitsSince(fs, basePath, "000").size())
+    assertEquals(2, HoodieDataSourceHelpers.listCommitsSince(storage, basePath, "000").size())
 
     // Third commit, new or existing partition, overwrite "driver" column to null for validation
     // Validation should succeed or fail, based on the query
@@ -362,7 +371,7 @@ class TestCOWDataSourceStorage extends SparkClientFunctionalTestHarness {
         .options(options)
         .mode(SaveMode.Append)
         .save(basePath)
-      assertEquals(3, HoodieDataSourceHelpers.listCommitsSince(fs, basePath, "000").size())
+      assertEquals(3, HoodieDataSourceHelpers.listCommitsSince(storage, basePath, "000").size())
     } else {
       assertThrowsWithPreCommitValidator(new Executable() {
         override def execute(): Unit = {

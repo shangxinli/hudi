@@ -20,6 +20,8 @@ package org.apache.hudi.internal.schema;
 
 import org.apache.hudi.common.util.PartitionPathEncodeUtils;
 
+import lombok.Getter;
+
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
@@ -48,6 +50,7 @@ public interface Type extends Serializable {
   /**
    * Enums for type names.
    */
+  @Getter
   enum TypeID {
     RECORD(Types.RecordType.class),
     ARRAY(List.class),
@@ -64,21 +67,20 @@ public interface Type extends Serializable {
     TIME(Long.class),
     TIMESTAMP(Long.class),
     DECIMAL(BigDecimal.class),
-    UUID(UUID.class);
+    UUID(UUID.class),
+    DECIMAL_BYTES(BigDecimal.class),
+    DECIMAL_FIXED(BigDecimal.class),
+    TIME_MILLIS(Integer.class),
+    TIMESTAMP_MILLIS(Long.class),
+    LOCAL_TIMESTAMP_MILLIS(Long.class),
+    LOCAL_TIMESTAMP_MICROS(Long.class);
+
     private final String name;
     private final Class<?> classTag;
 
     TypeID(Class<?> classTag) {
       this.name = this.name().toLowerCase(Locale.ROOT);
       this.classTag = classTag;
-    }
-
-    public String getName() {
-      return name;
-    }
-
-    public Class<?> getClassTag() {
-      return classTag;
     }
   }
 
@@ -107,6 +109,8 @@ public interface Type extends Serializable {
       case FLOAT:
         return Float.parseFloat(partitionValue);
       case DECIMAL:
+      case DECIMAL_BYTES:
+      case DECIMAL_FIXED:
         return new BigDecimal(partitionValue);
       case DOUBLE:
         return Double.parseDouble(partitionValue);

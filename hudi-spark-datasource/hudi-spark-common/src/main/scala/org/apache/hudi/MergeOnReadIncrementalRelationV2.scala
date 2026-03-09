@@ -42,14 +42,19 @@ import org.apache.spark.sql.types.StructType
 import scala.collection.JavaConverters._
 import scala.collection.immutable
 
+trait MergeOnReadIncrementalRelation {
+  def listFileSplits(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): Map[InternalRow, Seq[FileSlice]]
+  def getRequiredFilters: Seq[Filter]
+}
+
 case class MergeOnReadIncrementalRelationV2(override val sqlContext: SQLContext,
                                             override val optParams: Map[String, String],
                                             override val metaClient: HoodieTableMetaClient,
                                             private val userSchema: Option[StructType],
                                             private val prunedDataSchema: Option[StructType] = None,
-                                            override val rangeType: RangeType = RangeType.CLOSED_CLOSED)
-  extends BaseMergeOnReadSnapshotRelation(sqlContext, optParams, metaClient, Seq(), userSchema, prunedDataSchema)
-    with HoodieIncrementalRelationV2Trait {
+                                            override val rangeType: RangeType = RangeType.OPEN_CLOSED)
+  extends BaseMergeOnReadSnapshotRelation(sqlContext, optParams, metaClient, userSchema, prunedDataSchema)
+    with HoodieIncrementalRelationV2Trait with MergeOnReadIncrementalRelation {
 
   override type Relation = MergeOnReadIncrementalRelationV2
 
@@ -60,13 +65,7 @@ case class MergeOnReadIncrementalRelationV2(override val sqlContext: SQLContext,
     if (fullTableScan) {
       metaClient.getCommitsAndCompactionTimeline
     } else {
-      val completeTimeline =
-        metaClient.getCommitsTimeline.filterCompletedInstants()
-          .findInstantsInRangeByCompletionTime(startCompletionTime, endCompletionTime)
-
-      // Need to add pending compaction instants to avoid data missing, see HUDI-5990 for details.
-      val pendingCompactionTimeline = metaClient.getCommitsAndCompactionTimeline.filterPendingMajorOrMinorCompactionTimeline()
-      concatTimeline(completeTimeline, pendingCompactionTimeline, metaClient)
+      queryContext.getActiveTimeline
     }
   }
 
@@ -84,13 +83,17 @@ case class MergeOnReadIncrementalRelationV2(override val sqlContext: SQLContext,
     new HoodieMergeOnReadRDDV2(
       sqlContext.sparkContext,
       config = jobConf,
+      sqlConf = sqlContext.sparkSession.sessionState.conf,
       fileReaders = readers,
       tableSchema = tableSchema,
       requiredSchema = requiredSchema,
       tableState = tableState,
       mergeType = mergeType,
       fileSplits = fileSplits,
-      includedInstantTimeSet = Option(includedCommits.map(_.requestedTime).toSet))
+      includedInstantTimeSet = Option(includedCommits.map(_.requestedTime).toSet),
+      optionalFilters = optionalFilters,
+      metaClient = metaClient,
+      options = optParams)
   }
 
   override protected def collectFileSplits(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): List[HoodieMergeOnReadFileSplit] = {
@@ -98,7 +101,7 @@ case class MergeOnReadIncrementalRelationV2(override val sqlContext: SQLContext,
       List()
     } else {
       val fileSlices = if (fullTableScan) {
-        listLatestFileSlices(Seq(), partitionFilters, dataFilters)
+        listLatestFileSlices(partitionFilters, dataFilters)
       } else {
         val latestCommit = includedCommits.last.requestedTime
 
@@ -116,19 +119,19 @@ case class MergeOnReadIncrementalRelationV2(override val sqlContext: SQLContext,
     }
   }
 
-  def listFileSplits(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): Map[InternalRow, Seq[FileSlice]] = {
+  override def listFileSplits(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): Map[InternalRow, Seq[FileSlice]] = {
     val slices = if (includedCommits.isEmpty) {
       List()
     } else {
       val fileSlices = if (fullTableScan) {
-        listLatestFileSlices(Seq(), partitionFilters, dataFilters)
+        listLatestFileSlices(partitionFilters, dataFilters)
       } else {
         val latestCommit = includedCommits.last.requestedTime
         val fsView = new HoodieTableFileSystemView(metaClient, timeline, affectedFilesInCommits)
         val modifiedPartitions = getWritePartitionPaths(commitsMetadata)
 
         fileIndex.listMatchingPartitionPaths(HoodieFileIndex.convertFilterForTimestampKeyGenerator(metaClient, partitionFilters))
-          .map(p => p.path).filter(p => modifiedPartitions.contains(p))
+          .map(p => p.getPath).filter(p => modifiedPartitions.contains(p))
           .flatMap { relativePartitionPath =>
             fsView.getLatestMergedFileSlicesBeforeOrOn(relativePartitionPath, latestCommit).iterator().asScala
           }
@@ -145,13 +148,15 @@ case class MergeOnReadIncrementalRelationV2(override val sqlContext: SQLContext,
     })
   }
 
-  def getRequiredFilters: Seq[Filter] = {
+  override def getRequiredFilters: Seq[Filter] = {
     if (includedCommits.isEmpty) {
       Seq.empty
     } else {
       incrementalSpanRecordFilters
     }
   }
+
+  override def shouldIncludeLogFiles(): Boolean = fullTableScan
 
   private def filterFileSlices(fileSlices: Seq[FileSlice], pathGlobPattern: String): Seq[FileSlice] = {
     val filteredFileSlices = if (!StringUtils.isNullOrEmpty(pathGlobPattern)) {
@@ -200,8 +205,10 @@ trait HoodieIncrementalRelationV2Trait extends HoodieBaseRelation {
       .metaClient(metaClient)
       .startCompletionTime(optParams(DataSourceReadOptions.START_COMMIT.key))
       .endCompletionTime(optParams.getOrElse(DataSourceReadOptions.END_COMMIT.key, null))
-      .skipClustering(optParams.getOrElse(DataSourceReadOptions.INCREMENTAL_READ_SKIP_CLUSTER.key(),
-        String.valueOf(DataSourceReadOptions.INCREMENTAL_READ_SKIP_CLUSTER.defaultValue)).toBoolean)
+      // do not support skip cluster for spark incremental query yet to avoid data duplication problem,
+      // see details in HUDI-9672.
+      // .skipClustering(optParams.getOrElse(DataSourceReadOptions.INCREMENTAL_READ_SKIP_CLUSTER.key(),
+      //  String.valueOf(DataSourceReadOptions.INCREMENTAL_READ_SKIP_CLUSTER.defaultValue)).toBoolean)
       .skipCompaction(optParams.getOrElse(DataSourceReadOptions.INCREMENTAL_READ_SKIP_COMPACT.key(),
         String.valueOf(DataSourceReadOptions.INCREMENTAL_READ_SKIP_COMPACT.defaultValue)).toBoolean)
       .rangeType(rangeType)
@@ -237,8 +244,7 @@ trait HoodieIncrementalRelationV2Trait extends HoodieBaseRelation {
   override lazy val mandatoryFields: Seq[String] = {
     // NOTE: These columns are required for Incremental flow to be able to handle the rows properly, even in
     //       cases when no columns are requested to be fetched (for ex, when using {@code count()} API)
-    Seq(HoodieRecord.RECORD_KEY_METADATA_FIELD, HoodieRecord.COMMIT_TIME_METADATA_FIELD) ++
-      preCombineFieldOpt.map(Seq(_)).getOrElse(Seq())
+    Seq(HoodieRecord.RECORD_KEY_METADATA_FIELD, HoodieRecord.COMMIT_TIME_METADATA_FIELD) ++ orderingFields
   }
 
   protected def validate(): Unit = {

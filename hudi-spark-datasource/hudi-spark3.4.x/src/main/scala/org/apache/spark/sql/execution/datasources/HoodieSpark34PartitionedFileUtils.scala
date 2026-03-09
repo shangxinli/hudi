@@ -19,6 +19,7 @@
 
 package org.apache.spark.sql.execution.datasources
 
+import org.apache.hudi.DatabricksRuntimeHelper
 import org.apache.hudi.storage.StoragePath
 
 import org.apache.hadoop.fs.FileStatus
@@ -34,7 +35,7 @@ object HoodieSpark34PartitionedFileUtils extends HoodieSparkPartitionedFileUtils
   }
 
   override def getStringPathFromPartitionedFile(partitionedFile: PartitionedFile): String = {
-    partitionedFile.filePath.toString
+    partitionedFile.filePath.toPath.toString
   }
 
   override def createPartitionedFile(partitionValues: InternalRow,
@@ -49,6 +50,6 @@ object HoodieSpark34PartitionedFileUtils extends HoodieSparkPartitionedFileUtils
   }
 
   override def newPartitionDirectory(internalRow: InternalRow, statuses: Seq[FileStatus]): PartitionDirectory = {
-    PartitionDirectory(internalRow, statuses)
+    DatabricksRuntimeHelper.newPartitionDirectory(internalRow, statuses, (row, files) => PartitionDirectory(row, files))
   }
 }

@@ -18,17 +18,17 @@
 
 package org.apache.hudi.client;
 
-import org.apache.hudi.avro.AvroSchemaUtils;
 import org.apache.hudi.avro.HoodieAvroUtils;
-import org.apache.hudi.common.model.HoodieAvroRecord;
+import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.TableServiceType;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaCompatibility;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
-import org.apache.hudi.common.testutils.RawTripTestPayload;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieIndexConfig;
@@ -40,7 +40,8 @@ import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.testutils.HoodieClientTestBase;
 import org.apache.hudi.testutils.HoodieClientTestUtils;
 
-import org.apache.avro.Schema;
+import lombok.AccessLevel;
+import lombok.Getter;
 import org.apache.avro.generic.GenericRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -67,6 +68,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class TestTableSchemaEvolution extends HoodieClientTestBase {
 
   private final String initCommitTime = "000";
+  @Getter(AccessLevel.PROTECTED)
   private HoodieTableType tableType = HoodieTableType.COPY_ON_WRITE;
   private HoodieTestDataGenerator dataGenEvolved = new HoodieTestDataGenerator();
   private HoodieTestDataGenerator dataGenDevolved = new HoodieTestDataGenerator();
@@ -381,17 +383,12 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
   }
 
   private List<HoodieRecord> convertToSchema(List<HoodieRecord> records, String schemaStr) {
-    Schema newSchema = new Schema.Parser().parse(schemaStr);
+    HoodieSchema newSchema = HoodieSchema.parse(schemaStr);
     return records.stream().map(r -> {
       HoodieKey key = r.getKey();
-      GenericRecord payload;
-      try {
-        payload = (GenericRecord) ((HoodieAvroRecord) r).getData().getInsertValue(HoodieTestDataGenerator.AVRO_SCHEMA).get();
-        GenericRecord newPayload = HoodieAvroUtils.rewriteRecord(payload, newSchema);
-        return new HoodieAvroRecord(key, new RawTripTestPayload(newPayload.toString(), key.getRecordKey(), key.getPartitionPath(), schemaStr));
-      } catch (IOException e) {
-        throw new RuntimeException("Conversion to new schema failed");
-      }
+      GenericRecord payload = (GenericRecord) ((HoodieAvroIndexedRecord) r).getData();
+      GenericRecord newPayload = HoodieAvroUtils.rewriteRecord(payload, newSchema.toAvroSchema());
+      return new HoodieAvroIndexedRecord(key, newPayload);
     }).collect(Collectors.toList());
   }
 
@@ -407,11 +404,6 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
   }
 
   private static boolean isSchemaCompatible(String oldSchema, String newSchema, boolean shouldAllowDroppedColumns) {
-    return AvroSchemaUtils.isSchemaCompatible(new Schema.Parser().parse(oldSchema), new Schema.Parser().parse(newSchema), shouldAllowDroppedColumns);
-  }
-
-  @Override
-  protected HoodieTableType getTableType() {
-    return tableType;
+    return HoodieSchemaCompatibility.isSchemaCompatible(HoodieSchema.parse(oldSchema), HoodieSchema.parse(newSchema), shouldAllowDroppedColumns);
   }
 }

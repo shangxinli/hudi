@@ -34,6 +34,7 @@ import org.apache.hudi.common.table.timeline.TimelineUtils.HollowCommitHandling;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
+import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.config.HoodieCleanConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
@@ -61,11 +62,19 @@ import static org.apache.hudi.common.config.HoodieCommonConfig.INCREMENTAL_READ_
  * Tool helping to resolve the flink options {@link FlinkOptions}.
  */
 public class OptionsResolver {
+
+  /**
+   * Returns whether the current runtime mode is adaptive batch execution.
+   */
+  public static boolean isIncrementalJobGraph(Configuration conf) {
+    return conf.get(FlinkOptions.WRITE_INCREMENTAL_JOB_GRAPH_GENERATION);
+  }
+
   /**
    * Returns whether insert clustering is allowed with given configuration {@code conf}.
    */
   public static boolean insertClustering(Configuration conf) {
-    return isCowTable(conf) && isInsertOperation(conf) && conf.getBoolean(FlinkOptions.INSERT_CLUSTER);
+    return isCowTable(conf) && isInsertOperation(conf) && conf.get(FlinkOptions.INSERT_CLUSTER);
   }
 
   /**
@@ -74,7 +83,7 @@ public class OptionsResolver {
   public static boolean isAppendMode(Configuration conf) {
     // 1. inline clustering is supported for COW table;
     // 2. async clustering is supported for both COW and MOR table
-    return isInsertOperation(conf) && ((isCowTable(conf) && !conf.getBoolean(FlinkOptions.INSERT_CLUSTER)) || isMorTable(conf));
+    return isInsertOperation(conf) && ((isCowTable(conf) && !conf.get(FlinkOptions.INSERT_CLUSTER)) || isMorTable(conf));
   }
 
   /**
@@ -90,7 +99,7 @@ public class OptionsResolver {
    * Returns whether the table operation is 'insert'.
    */
   public static boolean isInsertOperation(Configuration conf) {
-    WriteOperationType operationType = WriteOperationType.fromValue(conf.getString(FlinkOptions.OPERATION));
+    WriteOperationType operationType = WriteOperationType.fromValue(conf.get(FlinkOptions.OPERATION));
     return operationType == WriteOperationType.INSERT;
   }
 
@@ -98,7 +107,7 @@ public class OptionsResolver {
    * Returns whether the table operation is 'upsert'.
    */
   public static boolean isUpsertOperation(Configuration conf) {
-    WriteOperationType operationType = WriteOperationType.fromValue(conf.getString(FlinkOptions.OPERATION));
+    WriteOperationType operationType = WriteOperationType.fromValue(conf.get(FlinkOptions.OPERATION));
     return operationType == WriteOperationType.UPSERT;
   }
 
@@ -106,7 +115,7 @@ public class OptionsResolver {
    * Returns whether the table operation is 'bulk_insert'.
    */
   public static boolean isBulkInsertOperation(Configuration conf) {
-    WriteOperationType operationType = WriteOperationType.fromValue(conf.getString(FlinkOptions.OPERATION));
+    WriteOperationType operationType = WriteOperationType.fromValue(conf.get(FlinkOptions.OPERATION));
     return operationType == WriteOperationType.BULK_INSERT;
   }
 
@@ -114,7 +123,7 @@ public class OptionsResolver {
    * Returns whether it is a MERGE_ON_READ table.
    */
   public static boolean isMorTable(Configuration conf) {
-    return conf.getString(FlinkOptions.TABLE_TYPE)
+    return conf.get(FlinkOptions.TABLE_TYPE)
         .toUpperCase(Locale.ROOT)
         .equals(FlinkOptions.TABLE_TYPE_MERGE_ON_READ);
   }
@@ -131,7 +140,7 @@ public class OptionsResolver {
    * Returns whether it is a COPY_ON_WRITE table.
    */
   public static boolean isCowTable(Configuration conf) {
-    return conf.getString(FlinkOptions.TABLE_TYPE)
+    return conf.get(FlinkOptions.TABLE_TYPE)
         .toUpperCase(Locale.ROOT)
         .equals(FlinkOptions.TABLE_TYPE_COPY_ON_WRITE);
   }
@@ -140,23 +149,36 @@ public class OptionsResolver {
    * Returns whether the payload clazz is {@link DefaultHoodieRecordPayload}.
    */
   public static boolean isDefaultHoodieRecordPayloadClazz(Configuration conf) {
-    return conf.getString(FlinkOptions.PAYLOAD_CLASS_NAME).contains(DefaultHoodieRecordPayload.class.getSimpleName());
+    return conf.get(FlinkOptions.PAYLOAD_CLASS_NAME).contains(DefaultHoodieRecordPayload.class.getSimpleName());
   }
 
   /**
-   * Returns the preCombine field
+   * Return value of {@link FlinkOptions#RECORD_KEY_FIELD} if it was set,
+   * or throw exception otherwise.
+   */
+  public static String getRecordKeyStr(Configuration conf) {
+    final String recordKeyStr = conf.get(FlinkOptions.RECORD_KEY_FIELD);
+    ValidationUtils.checkArgument(
+        recordKeyStr != null,
+        "Primary key definition is required, use either PRIMARY KEY syntax or option '"
+            + FlinkOptions.RECORD_KEY_FIELD.key() + "' to specify.");
+    return recordKeyStr;
+  }
+
+  /**
+   * Returns the ordering fields as comma separated string
    * or null if the value is set as {@link FlinkOptions#NO_PRE_COMBINE}.
    */
-  public static String getPreCombineField(Configuration conf) {
-    final String preCombineField = conf.getString(FlinkOptions.PRECOMBINE_FIELD);
-    return preCombineField.equals(FlinkOptions.NO_PRE_COMBINE) ? null : preCombineField;
+  public static String getOrderingFieldsStr(Configuration conf) {
+    final String orderingFields = conf.get(FlinkOptions.ORDERING_FIELDS);
+    return FlinkOptions.NO_PRE_COMBINE.equals(orderingFields) ? null : orderingFields;
   }
 
   /**
    * Returns whether the compaction strategy is based on elapsed delta time.
    */
   public static boolean isDeltaTimeCompaction(Configuration conf) {
-    final String strategy = conf.getString(FlinkOptions.COMPACTION_TRIGGER_STRATEGY).toLowerCase(Locale.ROOT);
+    final String strategy = conf.get(FlinkOptions.COMPACTION_TRIGGER_STRATEGY).toLowerCase(Locale.ROOT);
     return FlinkOptions.TIME_ELAPSED.equals(strategy) || FlinkOptions.NUM_OR_TIME.equals(strategy);
   }
 
@@ -171,7 +193,15 @@ public class OptionsResolver {
    * Returns whether the table index is bucket index.
    */
   public static boolean isBucketIndexType(Configuration conf) {
-    return conf.getString(FlinkOptions.INDEX_TYPE).equalsIgnoreCase(HoodieIndex.IndexType.BUCKET.name());
+    return conf.get(FlinkOptions.INDEX_TYPE).equalsIgnoreCase(HoodieIndex.IndexType.BUCKET.name());
+  }
+
+  /**
+   * Returns whether {@link org.apache.hudi.sink.partitioner.MinibatchBucketAssignFunction} should be used for bucket assigning.
+   */
+  public static boolean isRecordLevelIndex(Configuration conf) {
+    HoodieIndex.IndexType indexType = OptionsResolver.getIndexType(conf);
+    return indexType == HoodieIndex.IndexType.GLOBAL_RECORD_LEVEL_INDEX;
   }
 
   /**
@@ -214,9 +244,9 @@ public class OptionsResolver {
    * @return true if the source should emit changes.
    */
   public static boolean emitChangelog(Configuration conf) {
-    return conf.getBoolean(FlinkOptions.READ_AS_STREAMING) && conf.getBoolean(FlinkOptions.CHANGELOG_ENABLED)
-        || conf.getBoolean(FlinkOptions.READ_AS_STREAMING) && conf.getBoolean(FlinkOptions.CDC_ENABLED)
-        || isIncrementalQuery(conf) && conf.getBoolean(FlinkOptions.CDC_ENABLED);
+    return conf.get(FlinkOptions.READ_AS_STREAMING) && conf.get(FlinkOptions.CHANGELOG_ENABLED)
+        || conf.get(FlinkOptions.READ_AS_STREAMING) && conf.get(FlinkOptions.CDC_ENABLED)
+        || isIncrementalQuery(conf) && conf.get(FlinkOptions.CDC_ENABLED);
   }
 
   /**
@@ -225,7 +255,7 @@ public class OptionsResolver {
    * @return true if the source is read as streaming with changelog mode enabled.
    */
   public static boolean emitDeletes(Configuration conf) {
-    return conf.getBoolean(FlinkOptions.READ_AS_STREAMING) && conf.getBoolean(FlinkOptions.CHANGELOG_ENABLED);
+    return conf.get(FlinkOptions.READ_AS_STREAMING) && conf.get(FlinkOptions.CHANGELOG_ENABLED);
   }
 
   /**
@@ -234,8 +264,25 @@ public class OptionsResolver {
    * @param conf The flink configuration.
    */
   public static boolean needsAsyncCompaction(Configuration conf) {
-    return OptionsResolver.isMorTable(conf)
-        && conf.getBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED);
+    return OptionsResolver.isMorTable(conf) && conf.get(FlinkOptions.COMPACTION_ASYNC_ENABLED);
+  }
+
+  /**
+   * Returns whether there is need to schedule the async metadata compaction.
+   *
+   * @param conf The flink configuration.
+   */
+  public static boolean needsAsyncMetadataCompaction(Configuration conf) {
+    return isStreamingIndexWriteEnabled(conf) && conf.get(FlinkOptions.METADATA_COMPACTION_ASYNC_ENABLED);
+  }
+
+  /**
+   * Returns whether there is need to schedule the compaction plan for the metadata table.
+   *
+   * @param conf The flink configuration.
+   */
+  public static boolean needsScheduleMdtCompaction(Configuration conf) {
+    return isStreamingIndexWriteEnabled(conf) && conf.get(FlinkOptions.METADATA_COMPACTION_SCHEDULE_ENABLED);
   }
 
   /**
@@ -245,7 +292,7 @@ public class OptionsResolver {
    */
   public static boolean needsScheduleCompaction(Configuration conf) {
     return OptionsResolver.isMorTable(conf)
-        && conf.getBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED) && !isAppendMode(conf);
+        && conf.get(FlinkOptions.COMPACTION_SCHEDULE_ENABLED) && !isAppendMode(conf);
   }
 
   /**
@@ -254,7 +301,7 @@ public class OptionsResolver {
    * @param conf The flink configuration.
    */
   public static boolean needsAsyncClustering(Configuration conf) {
-    return isInsertOperation(conf) && conf.getBoolean(FlinkOptions.CLUSTERING_ASYNC_ENABLED);
+    return isInsertOperation(conf) && conf.get(FlinkOptions.CLUSTERING_ASYNC_ENABLED);
   }
 
   /**
@@ -263,10 +310,10 @@ public class OptionsResolver {
    * @param conf The flink configuration.
    */
   public static boolean needsScheduleClustering(Configuration conf) {
-    if (!conf.getBoolean(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED)) {
+    if (!conf.get(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED)) {
       return false;
     }
-    WriteOperationType operationType = WriteOperationType.fromValue(conf.getString(FlinkOptions.OPERATION));
+    WriteOperationType operationType = WriteOperationType.fromValue(conf.get(FlinkOptions.OPERATION));
     if (OptionsResolver.isConsistentHashingBucketIndexType(conf)) {
       // Write pipelines for table with consistent bucket index would detect whether clustering service occurs,
       // and automatically adjust the partitioner and write function if clustering service happens.
@@ -282,23 +329,23 @@ public class OptionsResolver {
    * Returns whether the clustering sort is enabled.
    */
   public static boolean sortClusteringEnabled(Configuration conf) {
-    return !StringUtils.isNullOrEmpty(conf.getString(FlinkOptions.CLUSTERING_SORT_COLUMNS));
+    return !StringUtils.isNullOrEmpty(conf.get(FlinkOptions.CLUSTERING_SORT_COLUMNS));
   }
 
   /**
    * Returns whether the operation is INSERT OVERWRITE (table or partition).
    */
   public static boolean isInsertOverwrite(Configuration conf) {
-    return conf.getString(FlinkOptions.OPERATION).equalsIgnoreCase(WriteOperationType.INSERT_OVERWRITE_TABLE.value())
-        || conf.getString(FlinkOptions.OPERATION).equalsIgnoreCase(WriteOperationType.INSERT_OVERWRITE.value());
+    return conf.get(FlinkOptions.OPERATION).equalsIgnoreCase(WriteOperationType.INSERT_OVERWRITE_TABLE.value())
+        || conf.get(FlinkOptions.OPERATION).equalsIgnoreCase(WriteOperationType.INSERT_OVERWRITE.value());
   }
 
   /**
    * Returns whether the operation is INSERT OVERWRITE dynamic partition.
    */
   public static boolean overwriteDynamicPartition(Configuration conf) {
-    return conf.getString(FlinkOptions.OPERATION).equalsIgnoreCase(WriteOperationType.INSERT_OVERWRITE.value())
-        || conf.getString(FlinkOptions.WRITE_PARTITION_OVERWRITE_MODE).equalsIgnoreCase(PartitionOverwriteMode.DYNAMIC.name());
+    return conf.get(FlinkOptions.OPERATION).equalsIgnoreCase(WriteOperationType.INSERT_OVERWRITE.value())
+        || conf.get(FlinkOptions.WRITE_PARTITION_OVERWRITE_MODE).equalsIgnoreCase(PartitionOverwriteMode.DYNAMIC.name());
   }
 
   /**
@@ -320,14 +367,14 @@ public class OptionsResolver {
    * Returns the read commits limit or -1 if not specified.
    */
   public static int getReadCommitsLimit(Configuration conf) {
-    return conf.getInteger(FlinkOptions.READ_COMMITS_LIMIT, -1);
+    return conf.getOptional(FlinkOptions.READ_COMMITS_LIMIT).orElse(-1);
   }
 
   /**
    * Returns the supplemental logging mode.
    */
   public static HoodieCDCSupplementalLoggingMode getCDCSupplementalLoggingMode(Configuration conf) {
-    String mode = conf.getString(FlinkOptions.SUPPLEMENTAL_LOGGING_MODE).toUpperCase();
+    String mode = conf.get(FlinkOptions.SUPPLEMENTAL_LOGGING_MODE).toUpperCase();
     return HoodieCDCSupplementalLoggingMode.valueOf(mode);
   }
 
@@ -335,7 +382,7 @@ public class OptionsResolver {
    * Returns whether comprehensive schema evolution enabled.
    */
   public static boolean isSchemaEvolutionEnabled(Configuration conf) {
-    return conf.getBoolean(HoodieCommonConfig.SCHEMA_EVOLUTION_ENABLE.key(), HoodieCommonConfig.SCHEMA_EVOLUTION_ENABLE.defaultValue());
+    return Boolean.parseBoolean(conf.getString(HoodieCommonConfig.SCHEMA_EVOLUTION_ENABLE.key(), HoodieCommonConfig.SCHEMA_EVOLUTION_ENABLE.defaultValue().toString()));
   }
 
   /**
@@ -349,15 +396,15 @@ public class OptionsResolver {
    * Returns whether consistent value will be generated for a logical timestamp type column.
    */
   public static boolean isConsistentLogicalTimestampEnabled(Configuration conf) {
-    return conf.getBoolean(KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.key(),
-        Boolean.parseBoolean(KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.defaultValue()));
+    return Boolean.parseBoolean(conf.getString(KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.key(),
+        KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.defaultValue()));
   }
 
   /**
    * Returns whether the writer txn should be guarded by lock.
    */
   public static boolean isLockRequired(Configuration conf) {
-    return conf.getBoolean(FlinkOptions.METADATA_ENABLED) || isMultiWriter(conf);
+    return conf.get(FlinkOptions.METADATA_ENABLED) || isMultiWriter(conf);
   }
 
   /**
@@ -389,7 +436,7 @@ public class OptionsResolver {
    * once it is disabled, the reader would infer the changes based on the file slice dependencies.
    */
   public static boolean readCDCFromChangelog(Configuration conf) {
-    return conf.getBoolean(FlinkOptions.READ_CDC_FROM_CHANGELOG);
+    return conf.get(FlinkOptions.READ_CDC_FROM_CHANGELOG);
   }
 
   /**
@@ -403,24 +450,26 @@ public class OptionsResolver {
   }
 
   /**
+   * Returns whether to streaming write to metadata table is enabled.
+   */
+  public static boolean isStreamingIndexWriteEnabled(Configuration conf) {
+    return conf.get(FlinkOptions.METADATA_ENABLED)
+        && OptionsResolver.getIndexType(conf) == HoodieIndex.IndexType.GLOBAL_RECORD_LEVEL_INDEX
+        && WriteOperationType.streamingWritesToMetadataSupported(WriteOperationType.fromValue(conf.get(FlinkOptions.OPERATION)));
+  }
+
+  /**
    * Returns the index type.
    */
   public static HoodieIndex.IndexType getIndexType(Configuration conf) {
-    return HoodieIndex.IndexType.valueOf(conf.getString(FlinkOptions.INDEX_TYPE).toUpperCase());
+    return HoodieIndex.IndexType.valueOf(conf.get(FlinkOptions.INDEX_TYPE).toUpperCase());
   }
 
   /**
    * Returns the index key field.
    */
   public static String getIndexKeyField(Configuration conf) {
-    return conf.getString(FlinkOptions.INDEX_KEY_FIELD, conf.getString(FlinkOptions.RECORD_KEY_FIELD));
-  }
-
-  /**
-   * Returns the index key field values.
-   */
-  public static String[] getIndexKeys(Configuration conf) {
-    return getIndexKeyField(conf).split(",");
+    return conf.getString(FlinkOptions.INDEX_KEY_FIELD.key(), getRecordKeyStr(conf));
   }
 
   /**
@@ -456,7 +505,7 @@ public class OptionsResolver {
    * Returns whether to commit even when current batch has no data, for flink defaults false
    */
   public static boolean allowCommitOnEmptyBatch(Configuration conf) {
-    return conf.getBoolean(HoodieWriteConfig.ALLOW_EMPTY_COMMIT.key(), HoodieWriteConfig.ALLOW_EMPTY_COMMIT.defaultValue());
+    return Boolean.parseBoolean(conf.getString(HoodieWriteConfig.ALLOW_EMPTY_COMMIT.key(), HoodieWriteConfig.ALLOW_EMPTY_COMMIT.defaultValue().toString()));
   }
 
   /**
@@ -485,16 +534,22 @@ public class OptionsResolver {
 
   /**
    * Returns whether the writers should use blocking instant time generation.
+   *
+   * <p>Blocking instant generation is enabled only for upsert workloads that require strict
+   * instant ordering, i.e. upsert on COW tables, or upsert with CDC enabled.
+   *
+   * <p>When this returns {@code true}, writer tasks wait for commit acknowledgement with timeout
+   * ({@link FlinkOptions#WRITE_COMMIT_ACK_TIMEOUT}). When this returns {@code false}.
    */
   public static boolean isBlockingInstantGeneration(Configuration conf) {
-    return isCowTable(conf) && isUpsertOperation(conf);
+    return (isCowTable(conf) || conf.get(FlinkOptions.CDC_ENABLED)) && isUpsertOperation(conf);
   }
 
   /**
    * Returns the customized insert partitioner instance.
    */
   public static Option<Partitioner> getInsertPartitioner(Configuration conf) {
-    String insertPartitionerClass = conf.getString(FlinkOptions.INSERT_PARTITIONER_CLASS_NAME);
+    String insertPartitionerClass = conf.get(FlinkOptions.INSERT_PARTITIONER_CLASS_NAME);
     try {
       return StringUtils.isNullOrEmpty(insertPartitionerClass)
           ? Option.empty()
@@ -502,6 +557,14 @@ public class OptionsResolver {
     } catch (Throwable e) {
       throw new HoodieException("Could not create custom insert partitioner " + insertPartitionerClass, e);
     }
+  }
+
+  /**
+   * Returns whether complex keygen encodes single record key with field name.
+   */
+  public static boolean useComplexKeygenNewEncoding(Configuration conf) {
+    return Boolean.parseBoolean(conf.getString(HoodieWriteConfig.COMPLEX_KEYGEN_NEW_ENCODING.key(),
+        HoodieWriteConfig.COMPLEX_KEYGEN_NEW_ENCODING.defaultValue().toString()));
   }
 
   // -------------------------------------------------------------------------
@@ -531,7 +594,14 @@ public class OptionsResolver {
    * Whether the reader only consumes new commit instants.
    */
   public static boolean isOnlyConsumingNewCommits(Configuration conf) {
-    return isMorTable(conf) && conf.getBoolean(FlinkOptions.READ_STREAMING_SKIP_COMPACT) // this is only true for flink.
-        || isAppendMode(conf) && conf.getBoolean(FlinkOptions.READ_STREAMING_SKIP_CLUSTERING);
+    return isMorTable(conf) && conf.get(FlinkOptions.READ_STREAMING_SKIP_COMPACT) // this is only true for flink.
+        || isAppendMode(conf) && conf.get(FlinkOptions.READ_STREAMING_SKIP_CLUSTERING);
+  }
+
+  /**
+   * Return the parallelism of the index write operator.
+   */
+  public static int indexWriteParallelism(Configuration conf) {
+    return OptionsResolver.isStreamingIndexWriteEnabled(conf) ? conf.get(FlinkOptions.INDEX_WRITE_TASKS) : 0;
   }
 }

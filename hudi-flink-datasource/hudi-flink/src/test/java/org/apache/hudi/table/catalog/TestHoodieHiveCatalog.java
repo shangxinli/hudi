@@ -22,6 +22,7 @@ import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieReplaceCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -38,17 +39,17 @@ import org.apache.hudi.sink.partitioner.profile.WriteProfiles;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
 import org.apache.hudi.util.StreamerUtil;
+import org.apache.hudi.utils.CatalogUtils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.calcite.shaded.com.google.common.collect.Lists;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
-import org.apache.flink.table.api.TableSchema;
+import org.apache.flink.table.catalog.AbstractCatalog;
 import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
 import org.apache.flink.table.catalog.CatalogTable;
-import org.apache.flink.table.catalog.CatalogTableImpl;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
 import org.apache.flink.table.catalog.exceptions.PartitionNotExistException;
@@ -77,7 +78,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.table.factories.FactoryUtil.CONNECTOR;
-import static org.apache.hudi.configuration.FlinkOptions.PRECOMBINE_FIELD;
+import static org.apache.hudi.configuration.FlinkOptions.ORDERING_FIELDS;
 import static org.apache.hudi.keygen.constant.KeyGeneratorOptions.RECORDKEY_FIELD_NAME;
 import static org.apache.hudi.table.catalog.HoodieCatalogTestUtils.createStorageConf;
 import static org.hamcrest.CoreMatchers.containsString;
@@ -94,41 +95,41 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Test cases for {@link HoodieHiveCatalog}.
  */
-public class TestHoodieHiveCatalog {
-  TableSchema schema =
-      TableSchema.builder()
-          .field("uuid", DataTypes.INT().notNull())
-          .field("name", DataTypes.STRING())
-          .field("age", DataTypes.INT())
-          .field("infos", DataTypes.ARRAY(DataTypes.STRING()))
-          .field("par1", DataTypes.STRING())
-          .field("ts_3", DataTypes.TIMESTAMP(3))
-          .field("ts_6", DataTypes.TIMESTAMP(6))
+public class TestHoodieHiveCatalog extends BaseTestHoodieCatalog {
+  Schema schema =
+      Schema.newBuilder()
+          .column("uuid", DataTypes.INT().notNull())
+          .column("name", DataTypes.STRING())
+          .column("age", DataTypes.INT())
+          .column("infos", DataTypes.ARRAY(DataTypes.STRING()))
+          .column("par1", DataTypes.STRING())
+          .column("ts_3", DataTypes.TIMESTAMP(3))
+          .column("ts_6", DataTypes.TIMESTAMP(6))
           .primaryKey("uuid")
           .build();
   List<String> partitions = Collections.singletonList("par1");
 
-  TableSchema multiKeySinglePartitionTableSchema =
-      TableSchema.builder()
-          .field("uuid", DataTypes.INT().notNull())
-          .field("name", DataTypes.STRING().notNull())
-          .field("age", DataTypes.INT())
-          .field("par1", DataTypes.STRING())
+  Schema multiKeySinglePartitionTableSchema =
+      Schema.newBuilder()
+          .column("uuid", DataTypes.INT().notNull())
+          .column("name", DataTypes.STRING().notNull())
+          .column("age", DataTypes.INT())
+          .column("par1", DataTypes.STRING())
           .primaryKey("uuid", "name")
           .build();
 
-  TableSchema singleKeyMultiPartitionTableSchema =
-      TableSchema.builder()
-          .field("uuid", DataTypes.INT().notNull())
-          .field("name", DataTypes.STRING())
-          .field("par1", DataTypes.STRING())
-          .field("par2", DataTypes.STRING())
+  Schema singleKeyMultiPartitionTableSchema =
+      Schema.newBuilder()
+          .column("uuid", DataTypes.INT().notNull())
+          .column("name", DataTypes.STRING())
+          .column("par1", DataTypes.STRING())
+          .column("par2", DataTypes.STRING())
           .primaryKey("uuid")
           .build();
   List<String> multiPartitions = Lists.newArrayList("par1", "par2");
 
   private static HoodieHiveCatalog hoodieCatalog;
-  private final ObjectPath tablePath = new ObjectPath("default", "test");
+  private final ObjectPath tablePath = new ObjectPath(TEST_DEFAULT_DATABASE, "test");
 
   @BeforeAll
   public static void createCatalog() {
@@ -155,8 +156,7 @@ public class TestHoodieHiveCatalog {
     options.put(FactoryUtil.CONNECTOR.key(), "hudi");
     options.put(FlinkOptions.TABLE_TYPE.key(), tableType.toString());
 
-    CatalogTable table =
-        new CatalogTableImpl(schema, partitions, options, "hudi table");
+    CatalogTable table = CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     hoodieCatalog.createTable(tablePath, table, false);
 
     // validate hive table
@@ -210,7 +210,7 @@ public class TestHoodieHiveCatalog {
     assertEquals("hudi", table1.getOptions().get(CONNECTOR.key()));
     assertEquals(tableType.toString(), table1.getOptions().get(FlinkOptions.TABLE_TYPE.key()));
     assertEquals("uuid", table1.getOptions().get(FlinkOptions.RECORD_KEY_FIELD.key()));
-    assertNull(table1.getOptions().get(PRECOMBINE_FIELD.key()), "preCombine key is not declared");
+    assertNull(table1.getOptions().get(ORDERING_FIELDS.key()), "preCombine key is not declared");
     String tableSchema = table1.getUnresolvedSchema().getColumns().stream()
         .map(Schema.UnresolvedColumn::toString)
         .collect(Collectors.joining(","));
@@ -221,13 +221,13 @@ public class TestHoodieHiveCatalog {
 
     // validate the full name of table create schema
     HoodieTableConfig tableConfig = StreamerUtil.getTableConfig(table1.getOptions().get(FlinkOptions.PATH.key()), hoodieCatalog.getHiveConf()).get();
-    Option<org.apache.avro.Schema> tableCreateSchema = tableConfig.getTableCreateSchema();
+    Option<HoodieSchema> tableCreateSchema = tableConfig.getTableCreateSchema();
     assertTrue(tableCreateSchema.isPresent(), "Table should have been created");
     assertThat(tableCreateSchema.get().getFullName(), is("hoodie.test.test_record"));
 
     // validate explicit primary key
     options.put(FlinkOptions.RECORD_KEY_FIELD.key(), "id");
-    table = new CatalogTableImpl(schema, partitions, options, "hudi table");
+    table = CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     hoodieCatalog.alterTable(tablePath, table, true);
 
     CatalogBaseTable table2 = hoodieCatalog.getTable(tablePath);
@@ -243,7 +243,7 @@ public class TestHoodieHiveCatalog {
     // validate single key and multiple partition for partitioned table
     ObjectPath singleKeyMultiPartitionPath = new ObjectPath("default", "tb_skmp_" + System.currentTimeMillis());
     CatalogTable singleKeyMultiPartitionTable =
-        new CatalogTableImpl(singleKeyMultiPartitionTableSchema, multiPartitions, options, "hudi table");
+        CatalogUtils.createCatalogTable(singleKeyMultiPartitionTableSchema, multiPartitions, options, "hudi table");
     hoodieCatalog.createTable(singleKeyMultiPartitionPath, singleKeyMultiPartitionTable, false);
 
     HoodieTableMetaClient singleKeyMultiPartitionTableMetaClient = HoodieTestUtils.createMetaClient(
@@ -256,7 +256,7 @@ public class TestHoodieHiveCatalog {
 
     options.remove(RECORDKEY_FIELD_NAME.key());
     CatalogTable multiKeySinglePartitionTable =
-        new CatalogTableImpl(multiKeySinglePartitionTableSchema, partitions, options, "hudi table");
+        CatalogUtils.createCatalogTable(multiKeySinglePartitionTableSchema, partitions, options, "hudi table");
     hoodieCatalog.createTable(multiKeySinglePartitionPath, multiKeySinglePartitionTable, false);
 
     HoodieTableMetaClient multiKeySinglePartitionTableMetaClient = HoodieTestUtils.createMetaClient(
@@ -267,7 +267,7 @@ public class TestHoodieHiveCatalog {
     // validate key generator for non partitioned table
     ObjectPath nonPartitionPath = new ObjectPath("default", "tb_" + tableType);
     CatalogTable nonPartitionTable =
-        new CatalogTableImpl(schema, new ArrayList<>(), options, "hudi table");
+        CatalogUtils.createCatalogTable(schema, new ArrayList<>(), options, "hudi table");
     hoodieCatalog.createTable(nonPartitionPath, nonPartitionTable, false);
 
     metaClient = HoodieTestUtils.createMetaClient(
@@ -279,7 +279,7 @@ public class TestHoodieHiveCatalog {
     List<String> multiPartitions =  Lists.newArrayList("par2", "par1");
     ObjectPath multiPartitionsTablePath = new ObjectPath("default", "tb_mp_" + System.currentTimeMillis());
     CatalogTable multiPartitionsTable =
-        new CatalogTableImpl(singleKeyMultiPartitionTableSchema, multiPartitions, options, "multi-partition hudi table");
+        CatalogUtils.createCatalogTable(singleKeyMultiPartitionTableSchema, multiPartitions, options, "multi-partition hudi table");
     RuntimeException exception = assertThrows(HoodieCatalogException.class, () -> hoodieCatalog.createTable(multiPartitionsTablePath, multiPartitionsTable, false));
     assertThat(exception.getCause().getMessage(), containsString("The order of regular fields(par1,par2) and partition fields(par2,par1) needs to be consistent"));
   }
@@ -291,7 +291,7 @@ public class TestHoodieHiveCatalog {
     // hoodie.index.type
     options.put(HoodieIndexConfig.INDEX_TYPE.key(), "BUCKET");
     CatalogTable table =
-        new CatalogTableImpl(schema, partitions, options, "hudi table");
+        CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     hoodieCatalog.createTable(tablePath, table, false);
     Map<String, String> params = hoodieCatalog.getHiveTable(tablePath).getParameters();
     assertResult(params, "BUCKET");
@@ -300,7 +300,7 @@ public class TestHoodieHiveCatalog {
     // index.type
     options.put(FlinkOptions.INDEX_TYPE.key(), FlinkOptions.INDEX_TYPE.defaultValue());
     table =
-        new CatalogTableImpl(schema, partitions, options, "hudi table");
+        CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     ObjectPath newTablePath1 = new ObjectPath("default", "test" + System.currentTimeMillis());
     hoodieCatalog.createTable(newTablePath1, table, false);
 
@@ -309,7 +309,7 @@ public class TestHoodieHiveCatalog {
 
     // index.type + hoodie.index.type
     options.put(HoodieIndexConfig.INDEX_TYPE.key(), "BUCKET");
-    table = new CatalogTableImpl(schema, partitions, options, "hudi table");
+    table = CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     ObjectPath newTablePath2 = new ObjectPath("default", "test" + System.currentTimeMillis());
     hoodieCatalog.createTable(newTablePath2, table, false);
 
@@ -324,7 +324,7 @@ public class TestHoodieHiveCatalog {
   }
 
   @Test
-  void testCreateTableWithoutPreCombineKey() throws TableAlreadyExistException, DatabaseNotExistException, IOException, TableNotExistException {
+  void testCreateTableWithoutOrderingFields() throws TableAlreadyExistException, DatabaseNotExistException, IOException, TableNotExistException {
     String db = "default";
     hoodieCatalog = HoodieCatalogTestUtils.createHiveCatalog();
     hoodieCatalog.open();
@@ -333,18 +333,18 @@ public class TestHoodieHiveCatalog {
     options.put(FactoryUtil.CONNECTOR.key(), "hudi");
 
     TypedProperties props = createTableAndReturnTableProperties(options, new ObjectPath(db, "tmptb1"));
-    assertFalse(props.containsKey("hoodie.table.precombine.field"));
+    assertFalse(props.containsKey(HoodieTableConfig.ORDERING_FIELDS.key()));
 
-    options.put(PRECOMBINE_FIELD.key(), "ts_3");
+    options.put(ORDERING_FIELDS.key(), "ts_3");
     props = createTableAndReturnTableProperties(options, new ObjectPath(db, "tmptb2"));
-    assertTrue(props.containsKey("hoodie.table.precombine.field"));
-    assertEquals("ts_3", props.get("hoodie.table.precombine.field"));
+    assertTrue(props.containsKey(HoodieTableConfig.ORDERING_FIELDS.key()));
+    assertEquals("ts_3", props.get(HoodieTableConfig.ORDERING_FIELDS.key()));
   }
 
   private TypedProperties createTableAndReturnTableProperties(Map<String, String> options, ObjectPath tablePath)
       throws TableAlreadyExistException, DatabaseNotExistException, TableNotExistException {
     CatalogTable table =
-        new CatalogTableImpl(schema, partitions, options, "hudi table");
+        CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     hoodieCatalog.createTable(tablePath, table, true);
 
     HoodieTableMetaClient metaClient = HoodieTestUtils.createMetaClient(
@@ -359,7 +359,7 @@ public class TestHoodieHiveCatalog {
     Map<String, String> originOptions = new HashMap<>();
     originOptions.put(FactoryUtil.CONNECTOR.key(), "hudi");
     CatalogTable table =
-        new CatalogTableImpl(schema, originOptions, "hudi table");
+        CatalogUtils.createCatalogTable(schema, Collections.emptyList(), originOptions, "hudi table");
     catalog.createTable(tablePath, table, false);
     Table table1 = catalog.getHiveTable(tablePath);
     assertTrue(Boolean.parseBoolean(table1.getParameters().get("EXTERNAL")));
@@ -373,8 +373,8 @@ public class TestHoodieHiveCatalog {
 
   @Test
   public void testCreateNonHoodieTable() throws TableAlreadyExistException, DatabaseNotExistException {
-    CatalogTable table =
-        new CatalogTableImpl(schema, Collections.singletonMap(FactoryUtil.CONNECTOR.key(), "hudi-fake"), "hudi table");
+    CatalogTable table = CatalogUtils.createCatalogTable(
+        schema, Collections.emptyList(), Collections.singletonMap(FactoryUtil.CONNECTOR.key(), "hudi-fake"), "hudi table");
     try {
       hoodieCatalog.createTable(tablePath, table, false);
     } catch (HoodieCatalogException e) {
@@ -387,8 +387,7 @@ public class TestHoodieHiveCatalog {
     HashMap<String,String> properties = new HashMap<>();
     properties.put(FactoryUtil.CONNECTOR.key(), "hudi");
     properties.put("table.type","wrong type");
-    CatalogTable table =
-            new CatalogTableImpl(schema,  properties, "hudi table");
+    CatalogTable table = CatalogUtils.createCatalogTable(schema, Collections.emptyList(), properties, "hudi table");
     assertThrows(HoodieCatalogException.class, () -> hoodieCatalog.createTable(tablePath, table, false));
   }
 
@@ -398,9 +397,8 @@ public class TestHoodieHiveCatalog {
     HoodieHiveCatalog catalog = HoodieCatalogTestUtils.createHiveCatalog("myCatalog", external);
     catalog.open();
 
-    CatalogTable catalogTable =
-        new CatalogTableImpl(schema, Collections.singletonMap(FactoryUtil.CONNECTOR.key(), "hudi"),
-            "hudi table");
+    CatalogTable catalogTable = CatalogUtils.createCatalogTable(
+        schema, Collections.emptyList(), Collections.singletonMap(FactoryUtil.CONNECTOR.key(), "hudi"), "hudi table");
     catalog.createTable(tablePath, catalogTable, false);
     Table table = catalog.getHiveTable(tablePath);
     assertEquals(external, Boolean.parseBoolean(table.getParameters().get("EXTERNAL")));
@@ -415,14 +413,13 @@ public class TestHoodieHiveCatalog {
   public void testAlterTable() throws Exception {
     Map<String, String> originOptions = new HashMap<>();
     originOptions.put(FactoryUtil.CONNECTOR.key(), "hudi");
-    CatalogTable originTable =
-        new CatalogTableImpl(schema, partitions, originOptions, "hudi table");
+    CatalogTable originTable = CatalogUtils.createCatalogTable(schema, partitions, originOptions, "hudi table");
     hoodieCatalog.createTable(tablePath, originTable, false);
 
     Table hiveTable = hoodieCatalog.getHiveTable(tablePath);
     Map<String, String> newOptions = hiveTable.getParameters();
     newOptions.put("k", "v");
-    CatalogTable newTable = new CatalogTableImpl(schema, partitions, newOptions, "alter hudi table");
+    CatalogTable newTable = CatalogUtils.createCatalogTable(schema, partitions, newOptions, "alter hudi table");
     hoodieCatalog.alterTable(tablePath, newTable, false);
 
     hiveTable = hoodieCatalog.getHiveTable(tablePath);
@@ -434,8 +431,7 @@ public class TestHoodieHiveCatalog {
   public void testRenameTable() throws Exception {
     Map<String, String> originOptions = new HashMap<>();
     originOptions.put(FactoryUtil.CONNECTOR.key(), "hudi");
-    CatalogTable originTable =
-        new CatalogTableImpl(schema, partitions, originOptions, "hudi table");
+    CatalogTable originTable = CatalogUtils.createCatalogTable(schema, partitions, originOptions, "hudi table");
     hoodieCatalog.createTable(tablePath, originTable, false);
 
     hoodieCatalog.renameTable(tablePath, "test1", false);
@@ -449,8 +445,7 @@ public class TestHoodieHiveCatalog {
   public void testDropPartition() throws Exception {
     Map<String, String> options = new HashMap<>();
     options.put(FactoryUtil.CONNECTOR.key(), "hudi");
-    CatalogTable table =
-        new CatalogTableImpl(schema, partitions, options, "hudi table");
+    CatalogTable table = CatalogUtils.createCatalogTable(schema, partitions, options, "hudi table");
     hoodieCatalog.createTable(tablePath, table, false);
 
     CatalogPartitionSpec partitionSpec = new CatalogPartitionSpec(new HashMap<String, String>() {
@@ -490,11 +485,11 @@ public class TestHoodieHiveCatalog {
     catalog.open();
     Map<String, String> originOptions = new HashMap<>();
     originOptions.put(FactoryUtil.CONNECTOR.key(), "hudi");
-    CatalogTable table = new CatalogTableImpl(schema, originOptions, "hudi table");
+    CatalogTable table = CatalogUtils.createCatalogTable(schema, Collections.emptyList(), originOptions, "hudi table");
     catalog.createTable(tablePath, table, false);
 
     Table hiveTable = hoodieCatalog.getHiveTable(tablePath);
-    assertEquals("false", hiveTable.getParameters().get("hadoop.hive.metastore.schema.verification"));
+    assertEquals("false", hiveTable.getParameters().get("hadoop.hive.metastore.sasl.enabled"));
   }
 
   @Test
@@ -508,13 +503,13 @@ public class TestHoodieHiveCatalog {
     String pkError = String.format("Primary key fields definition has inconsistency between pk statement and option '%s'",
         FlinkOptions.RECORD_KEY_FIELD.key());
     originOptions.put(FlinkOptions.RECORD_KEY_FIELD.key(), "name");
-    CatalogTable pkTable = new CatalogTableImpl(schema, partitions, originOptions, "hudi table");
+    CatalogTable pkTable = CatalogUtils.createCatalogTable(schema, partitions, originOptions, "hudi table");
     assertThrows(HoodieValidationException.class, () -> catalog.createTable(tablePath, pkTable, false), pkError);
     originOptions.remove(FlinkOptions.RECORD_KEY_FIELD.key());
 
     // validate pk: the pk field exist in options but not in pk statement.
     originOptions.put(FlinkOptions.RECORD_KEY_FIELD.key(), "uuid,name");
-    CatalogTable pkTable1 = new CatalogTableImpl(schema, partitions, originOptions, "hudi table");
+    CatalogTable pkTable1 = CatalogUtils.createCatalogTable(schema, partitions, originOptions, "hudi table");
     assertThrows(HoodieValidationException.class, () -> catalog.createTable(tablePath, pkTable1, false), pkError);
     originOptions.remove(FlinkOptions.RECORD_KEY_FIELD.key());
 
@@ -522,13 +517,13 @@ public class TestHoodieHiveCatalog {
     String partitionKeyError = String.format("Partition key fields definition has inconsistency between partition key statement and option '%s'",
         FlinkOptions.PARTITION_PATH_FIELD.key());
     originOptions.put(FlinkOptions.PARTITION_PATH_FIELD.key(), "name");
-    CatalogTable partitionKeytable = new CatalogTableImpl(schema, partitions, originOptions, "hudi table");
+    CatalogTable partitionKeytable = CatalogUtils.createCatalogTable(schema, partitions, originOptions, "hudi table");
     assertThrows(HoodieValidationException.class, () -> catalog.createTable(tablePath, partitionKeytable, false), partitionKeyError);
     originOptions.remove(FlinkOptions.PARTITION_PATH_FIELD.key());
 
     // validate partition key: the partition key field exist in options but not in partition key statement.
     originOptions.put(FlinkOptions.PARTITION_PATH_FIELD.key(), "par1,name");
-    CatalogTable partitionKeytable1 = new CatalogTableImpl(schema, partitions, originOptions, "hudi table");
+    CatalogTable partitionKeytable1 = CatalogUtils.createCatalogTable(schema, partitions, originOptions, "hudi table");
     assertThrows(HoodieValidationException.class, () -> catalog.createTable(tablePath, partitionKeytable1, false), partitionKeyError);
     originOptions.remove(FlinkOptions.PARTITION_PATH_FIELD.key());
   }
@@ -539,5 +534,10 @@ public class TestHoodieHiveCatalog {
         tablePath.getObjectName(),
         HoodieCatalogUtil.getOrderedPartitionValues(
             hoodieCatalog.getName(), hoodieCatalog.getHiveConf(), partitionSpec, partitions, tablePath));
+  }
+
+  @Override
+  AbstractCatalog getCatalog() {
+    return hoodieCatalog;
   }
 }

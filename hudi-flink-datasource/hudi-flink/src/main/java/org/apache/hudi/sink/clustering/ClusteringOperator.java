@@ -20,8 +20,6 @@ package org.apache.hudi.sink.clustering;
 
 import org.apache.hudi.adapter.MaskingOutputAdapter;
 import org.apache.hudi.adapter.Utils;
-import org.apache.hudi.avro.AvroSchemaUtils;
-import org.apache.hudi.client.FlinkTaskContextSupplier;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.utils.CloseableConcatenatingIterator;
@@ -32,6 +30,8 @@ import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.read.HoodieFileGroupReader;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
@@ -53,11 +53,13 @@ import org.apache.hudi.table.HoodieFlinkTable;
 import org.apache.hudi.table.format.FormatUtils;
 import org.apache.hudi.table.format.HoodieRowDataParquetReader;
 import org.apache.hudi.table.format.InternalSchemaManager;
-import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.DataTypeUtils;
+import org.apache.hudi.util.FlinkTaskContextSupplier;
 import org.apache.hudi.util.FlinkWriteClients;
+import org.apache.hudi.util.HoodieSchemaConverter;
+import org.apache.hudi.utils.RuntimeContextUtils;
 
-import org.apache.avro.Schema;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.Gauge;
@@ -68,6 +70,7 @@ import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.StreamTask;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
@@ -81,8 +84,6 @@ import org.apache.flink.table.runtime.typeutils.BinaryRowDataSerializer;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.runtime.util.StreamRecordCollector;
 import org.apache.flink.table.types.logical.RowType;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -95,17 +96,17 @@ import java.util.stream.Collectors;
  * Operator to execute the actual clustering task assigned by the clustering plan task.
  * In order to execute scalable, the input should shuffle by the clustering event {@link ClusteringPlanEvent}.
  */
+@Slf4j
 public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEvent> implements
     OneInputStreamOperator<ClusteringPlanEvent, ClusteringCommitEvent>, BoundedOneInput {
-  private static final Logger LOG = LoggerFactory.getLogger(ClusteringOperator.class);
 
   private final Configuration conf;
   private final RowType rowType;
   private int taskID;
   private transient HoodieWriteConfig writeConfig;
   private transient HoodieFlinkTable<?> table;
-  private transient Schema schema;
-  private transient Schema readerSchema;
+  private transient HoodieSchema schema;
+  private transient HoodieSchema readerSchema;
   private transient HoodieFlinkWriteClient writeClient;
   private transient StreamRecordCollector<ClusteringCommitEvent> collector;
   private transient BinaryRowDataSerializer binarySerializer;
@@ -135,13 +136,13 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
     this.sortClusteringEnabled = OptionsResolver.sortClusteringEnabled(conf);
 
     // override max parquet file size in conf
-    this.conf.setLong(HoodieStorageConfig.PARQUET_MAX_FILE_SIZE.key(),
-        this.conf.getLong(FlinkOptions.CLUSTERING_PLAN_STRATEGY_TARGET_FILE_MAX_BYTES));
+    this.conf.setString(HoodieStorageConfig.PARQUET_MAX_FILE_SIZE.key(),
+        this.conf.get(FlinkOptions.CLUSTERING_PLAN_STRATEGY_TARGET_FILE_MAX_BYTES) + "");
 
     // target size should larger than small file limit
-    this.conf.setLong(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SMALL_FILE_LIMIT.key(),
-        Math.min(this.conf.getLong(FlinkOptions.CLUSTERING_PLAN_STRATEGY_TARGET_FILE_MAX_BYTES) / 1024 / 1024,
-            this.conf.getLong(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SMALL_FILE_LIMIT)));
+    this.conf.setString(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SMALL_FILE_LIMIT.key(),
+        Math.min(this.conf.get(FlinkOptions.CLUSTERING_PLAN_STRATEGY_TARGET_FILE_MAX_BYTES) / 1024 / 1024,
+            this.conf.get(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SMALL_FILE_LIMIT)) + "");
   }
 
   @Override
@@ -149,25 +150,34 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
     super.setup(containingTask, config, new MaskingOutputAdapter<>(output));
   }
 
+  /**
+   * The modifier of this method is updated to `protected` sink Flink 2.0, here we overwrite the method
+   * with `public` modifier to make it compatible considering usage in hudi-flink module.
+   */
+  @Override
+  public void setProcessingTimeService(ProcessingTimeService processingTimeService) {
+    super.setProcessingTimeService(processingTimeService);
+  }
+
   @Override
   public void open() throws Exception {
     super.open();
 
-    this.taskID = getRuntimeContext().getIndexOfThisSubtask();
+    this.taskID = RuntimeContextUtils.getIndexOfThisSubtask(getRuntimeContext());
     this.writeConfig = FlinkWriteClients.getHoodieClientConfig(this.conf, false, false);
     this.writeClient = FlinkWriteClients.createWriteClient(conf, getRuntimeContext());
     this.table = writeClient.getHoodieTable();
 
-    this.schema = AvroSchemaConverter.convertToSchema(rowType);
+    this.schema = HoodieSchemaConverter.convertToSchema(rowType);
     // Since there exists discrepancies between flink and spark dealing with nullability of primary key field,
     // and there may be some files written by spark, force update schema as nullable to make sure clustering
     // scan successfully without schema validating exception.
-    this.readerSchema = AvroSchemaUtils.asNullable(schema);
+    this.readerSchema = HoodieSchemaUtils.asNullable(schema);
 
     this.binarySerializer = new BinaryRowDataSerializer(rowType.getFieldCount());
 
     if (this.asyncClustering) {
-      this.executor = NonThrownExecutor.builder(LOG).build();
+      this.executor = NonThrownExecutor.builder(log).build();
     }
 
     this.collector = new StreamRecordCollector<>(output);
@@ -188,7 +198,7 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
           "Execute clustering for instant %s from task %d", instantTime, taskID);
     } else {
       // executes the clustering task synchronously for batch mode.
-      LOG.info("Execute clustering for instant {} from task {}", instantTime, taskID);
+      log.info("Execute clustering for instant {} from task {}", instantTime, taskID);
       doClustering(instantTime, clusteringOperations);
     }
   }
@@ -218,8 +228,8 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
   private void doClustering(String instantTime, List<ClusteringOperation> clusteringOperations) throws Exception {
     clusteringMetrics.startClustering();
     BulkInsertWriterHelper writerHelper = new BulkInsertWriterHelper(this.conf, this.table, this.writeConfig,
-        instantTime, this.taskID, getRuntimeContext().getNumberOfParallelSubtasks(), getRuntimeContext().getAttemptNumber(),
-        this.rowType, true);
+        instantTime, this.taskID, RuntimeContextUtils.getNumberOfParallelSubtasks(getRuntimeContext()),
+        RuntimeContextUtils.getAttemptNumber(getRuntimeContext()), this.rowType, true);
 
     Iterator<RowData> iterator;
     if (clusteringOperations.stream().anyMatch(operation -> CollectionUtils.nonEmpty(operation.getDeltaFilePaths()))) {
@@ -263,7 +273,7 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
   private Iterator<RowData> readRecordsForGroupWithLogs(List<ClusteringOperation> clusteringOps, String instantTime) {
     List<ClosableIterator<RowData>> recordIterators = new ArrayList<>();
     long maxMemoryPerCompaction = IOUtils.getMaxMemoryPerCompaction(new FlinkTaskContextSupplier(null), writeConfig);
-    LOG.info("MaxMemoryPerCompaction run as part of clustering => {}", maxMemoryPerCompaction);
+    log.info("MaxMemoryPerCompaction run as part of clustering => {}", maxMemoryPerCompaction);
 
     for (ClusteringOperation clusteringOp : clusteringOps) {
       try {

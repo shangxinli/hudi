@@ -22,7 +22,7 @@ package org.apache.spark.sql.hudi.dml.others
 import org.apache.hudi.common.config.RecordMergeMode.COMMIT_TIME_ORDERING
 import org.apache.hudi.common.model.HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID
 import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload
-import org.apache.hudi.common.table.HoodieTableConfig
+import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableVersion}
 import org.apache.hudi.common.testutils.HoodieTestUtils
 
 import org.apache.spark.sql.hudi.common.HoodieSparkSqlTestBase
@@ -31,16 +31,20 @@ import org.apache.spark.sql.hudi.common.HoodieSparkSqlTestBase.validateTableConf
 class TestMergeModeCommitTimeOrdering extends HoodieSparkSqlTestBase {
 
   Seq(
-    "cow,8,false,false", "cow,8,false,true", "cow,8,true,false",
-    "cow,6,true,false", "cow,6,true,true",
-    "mor,8,false,false", "mor,8,false,true", "mor,8,true,false",
-    "mor,6,true,true").foreach { args =>
+    "cow,current,false,false", "cow,current,false,true", "cow,current,true,false",
+    "mor,current,false,false", "mor,current,false,true", "mor,current,true,false",
+    "cow,6,true,false", "cow,6,true,true", "mor,6,true,true",
+    "cow,8,true,false", "cow,8,true,true", "mor,8,true,true").foreach { args =>
     val argList = args.split(',')
     val tableType = argList(0)
-    val tableVersion = argList(1)
+    val tableVersion = if (argList(1).equals("current")) {
+      String.valueOf(HoodieTableVersion.current().versionCode())
+    } else {
+      argList(1)
+    }
     val setRecordMergeConfigs = argList(2).toBoolean
     val setUpsertOperation = argList(3).toBoolean
-    val isUpsert = setUpsertOperation || (tableVersion.toInt != 6 && setRecordMergeConfigs)
+    val isUpsert = setUpsertOperation
     val storage = HoodieTestUtils.getDefaultStorage
     val mergeConfigClause = if (setRecordMergeConfigs) {
       // with precombine field set, UPSERT operation is used automatically
@@ -48,36 +52,43 @@ class TestMergeModeCommitTimeOrdering extends HoodieSparkSqlTestBase {
         // Table version 6
         s", payloadClass = '${classOf[OverwriteWithLatestAvroPayload].getName}'"
       } else {
-        // Current table version (8)
+        // Current table version >= 8
         ", preCombineField = 'ts',\nhoodie.record.merge.mode = 'COMMIT_TIME_ORDERING'"
       }
     } else {
       // By default, the COMMIT_TIME_ORDERING is used if not specified by the user
       ""
     }
-    val writeTableVersionClause = if (tableVersion.toInt == 6) {
+    val writeTableVersionClause = if (tableVersion.toInt < HoodieTableVersion.current().versionCode()) {
       s"hoodie.write.table.version = $tableVersion,"
     } else {
       ""
     }
-    val expectedMergeConfigs = if (tableVersion.toInt == 6) {
-      Map(
-        HoodieTableConfig.VERSION.key -> "6",
-        HoodieTableConfig.PAYLOAD_CLASS_NAME.key -> classOf[OverwriteWithLatestAvroPayload].getName)
-    } else {
-      Map(
-        HoodieTableConfig.VERSION.key -> "8",
-        HoodieTableConfig.RECORD_MERGE_MODE.key -> COMMIT_TIME_ORDERING.name(),
-        HoodieTableConfig.PAYLOAD_CLASS_NAME.key -> classOf[OverwriteWithLatestAvroPayload].getName,
-        HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key -> COMMIT_TIME_BASED_MERGE_STRATEGY_UUID)
+    val expectedMergeConfigs: Map[String, String] = tableVersion.toInt match {
+      case 6 =>
+        Map(
+          HoodieTableConfig.VERSION.key -> "6",
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key -> classOf[OverwriteWithLatestAvroPayload].getName
+        )
+      case 8 =>
+        Map(
+          HoodieTableConfig.VERSION.key -> tableVersion,
+          HoodieTableConfig.RECORD_MERGE_MODE.key -> COMMIT_TIME_ORDERING.name(),
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key -> COMMIT_TIME_BASED_MERGE_STRATEGY_UUID
+        )
+      case _ =>
+        Map(
+          HoodieTableConfig.VERSION.key -> tableVersion,
+          HoodieTableConfig.RECORD_MERGE_MODE.key -> COMMIT_TIME_ORDERING.name()
+        )
     }
     val nonExistentConfigs = if (tableVersion.toInt == 6) {
-      Seq(HoodieTableConfig.RECORD_MERGE_MODE.key, HoodieTableConfig.PRECOMBINE_FIELD.key)
+      Seq(HoodieTableConfig.RECORD_MERGE_MODE.key, HoodieTableConfig.ORDERING_FIELDS.key)
     } else {
       if (setRecordMergeConfigs) {
         Seq()
       } else {
-        Seq(HoodieTableConfig.PRECOMBINE_FIELD.key)
+        Seq(HoodieTableConfig.ORDERING_FIELDS.key)
       }
     }
 
@@ -276,7 +287,7 @@ class TestMergeModeCommitTimeOrdering extends HoodieSparkSqlTestBase {
             storage, tmp.getCanonicalPath, expectedMergeConfigs, nonExistentConfigs)
 
           // TODO(HUDI-8840): enable MERGE INTO with deletes
-          val shouldTestMergeIntoDelete = setRecordMergeConfigs && tableVersion.toInt == 8
+          val shouldTestMergeIntoDelete = setRecordMergeConfigs && (tableVersion.toInt >= 8)
           // Merge operation - delete with higher, lower and equal ordering field value, all should take effect.
           if (shouldTestMergeIntoDelete) {
             spark.sql(

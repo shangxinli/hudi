@@ -56,11 +56,11 @@ public interface CompletionTimeQueryView extends AutoCloseable {
   /**
    * Queries the completion time with given instant time.
    *
-   * @param instantTime The instant time.
+   * @param requestedTime The time the commit was requested.
    *
    * @return The completion time if the instant finished or empty if it is still pending.
    */
-  Option<String> getCompletionTime(String beginTime);
+  Option<String> getCompletionTime(String requestedTime);
 
   /**
    * Queries the instant times with given completion time range.
@@ -97,13 +97,13 @@ public interface CompletionTimeQueryView extends AutoCloseable {
 
   /**
    *  Get Cursor Instant
-   * @return
+   * @return {@link String} instant time of the cursor.
    */
   String getCursorInstant();
 
   /**
    * Return true if the table is empty.
-   * @return
+   * @return {@code true} if the table is empty, {@code false} otherwise.
    */
   boolean isEmptyTable();
 }

@@ -153,6 +153,20 @@ public class FlinkClusteringConfig extends Configuration {
       description = "Min clustering interval of async clustering service, default 10 minutes")
   public Integer minClusteringIntervalSeconds = 600;
 
+  @Parameter(names = {"--retry", "-rt"}, description = "Number of retries for clustering operation. "
+      + "Only effective in single-run mode (not service mode). Default is 0 (no retry).")
+  public Integer retry = 0;
+
+  @Parameter(names = {"--retry-last-failed-job", "-rc"},
+      description = "Check and retry last failed clustering job if the inflight instant exceeds max processing time. "
+          + "Only effective in single-run mode.")
+  public Boolean retryLastFailedJob = false;
+
+  @Parameter(names = {"--job-max-processing-time-ms", "-jt"},
+      description = "Max processing time in milliseconds before considering a clustering job as failed. "
+          + "Used with --retry-last-failed-job. Default 0 means no timeout check.")
+  public Long maxProcessingTimeMs = 0L;
+
   @Parameter(names = {"--hoodie-conf"}, description = "Any configuration that can be set in the properties file "
       + "(using the CLI parameter \"--props\") can also be passed through command line using this parameter.")
   public List<String> configs = new ArrayList<>();
@@ -178,38 +192,38 @@ public class FlinkClusteringConfig extends Configuration {
     Map<String, String> propsMap = new HashMap<String, String>((Map) getProps(config));
     org.apache.flink.configuration.Configuration conf = fromMap(propsMap);
 
-    conf.setString(FlinkOptions.PATH, config.path);
-    conf.setInteger(FlinkOptions.ARCHIVE_MAX_COMMITS, config.archiveMaxCommits);
-    conf.setInteger(FlinkOptions.ARCHIVE_MIN_COMMITS, config.archiveMinCommits);
-    conf.setString(FlinkOptions.CLEAN_POLICY, config.cleanPolicy);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_COMMITS, config.cleanRetainCommits);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_HOURS, config.cleanRetainHours);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_FILE_VERSIONS, config.cleanRetainFileVersions);
-    conf.setInteger(FlinkOptions.CLUSTERING_DELTA_COMMITS, config.clusteringDeltaCommits);
-    conf.setInteger(FlinkOptions.CLUSTERING_TASKS, config.clusteringTasks);
-    conf.setString(FlinkOptions.CLUSTERING_PLAN_STRATEGY_CLASS, config.planStrategyClass);
-    conf.setString(FlinkOptions.CLUSTERING_PLAN_PARTITION_FILTER_MODE_NAME, config.planPartitionFilterMode);
-    conf.setLong(FlinkOptions.CLUSTERING_PLAN_STRATEGY_TARGET_FILE_MAX_BYTES, config.targetFileMaxBytes);
-    conf.setLong(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SMALL_FILE_LIMIT, config.smallFileLimit);
-    conf.setInteger(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SKIP_PARTITIONS_FROM_LATEST, config.skipFromLatestPartitions);
-    conf.setString(FlinkOptions.CLUSTERING_PLAN_STRATEGY_CLUSTER_BEGIN_PARTITION, config.clusterBeginPartition);
-    conf.setString(FlinkOptions.CLUSTERING_PLAN_STRATEGY_CLUSTER_END_PARTITION, config.clusterEndPartition);
-    conf.setString(FlinkOptions.CLUSTERING_PLAN_STRATEGY_PARTITION_REGEX_PATTERN, config.partitionRegexPattern);
-    conf.setString(FlinkOptions.CLUSTERING_PLAN_STRATEGY_PARTITION_SELECTED, config.partitionSelected);
-    conf.setString(FlinkOptions.CLUSTERING_SORT_COLUMNS, config.sortColumns);
-    conf.setInteger(FlinkOptions.WRITE_SORT_MEMORY, config.sortMemory);
-    conf.setInteger(FlinkOptions.CLUSTERING_MAX_NUM_GROUPS, config.maxNumGroups);
-    conf.setInteger(FlinkOptions.CLUSTERING_TARGET_PARTITIONS, config.targetPartitions);
-    conf.setBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED, config.cleanAsyncEnable);
+    conf.set(FlinkOptions.PATH, config.path);
+    conf.set(FlinkOptions.ARCHIVE_MAX_COMMITS, config.archiveMaxCommits);
+    conf.set(FlinkOptions.ARCHIVE_MIN_COMMITS, config.archiveMinCommits);
+    conf.set(FlinkOptions.CLEAN_POLICY, config.cleanPolicy);
+    conf.set(FlinkOptions.CLEAN_RETAIN_COMMITS, config.cleanRetainCommits);
+    conf.set(FlinkOptions.CLEAN_RETAIN_HOURS, config.cleanRetainHours);
+    conf.set(FlinkOptions.CLEAN_RETAIN_FILE_VERSIONS, config.cleanRetainFileVersions);
+    conf.set(FlinkOptions.CLUSTERING_DELTA_COMMITS, config.clusteringDeltaCommits);
+    conf.set(FlinkOptions.CLUSTERING_TASKS, config.clusteringTasks);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_CLASS, config.planStrategyClass);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_PARTITION_FILTER_MODE_NAME, config.planPartitionFilterMode);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_TARGET_FILE_MAX_BYTES, config.targetFileMaxBytes);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SMALL_FILE_LIMIT, config.smallFileLimit);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_SKIP_PARTITIONS_FROM_LATEST, config.skipFromLatestPartitions);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_CLUSTER_BEGIN_PARTITION, config.clusterBeginPartition);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_CLUSTER_END_PARTITION, config.clusterEndPartition);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_PARTITION_REGEX_PATTERN, config.partitionRegexPattern);
+    conf.set(FlinkOptions.CLUSTERING_PLAN_STRATEGY_PARTITION_SELECTED, config.partitionSelected);
+    conf.set(FlinkOptions.CLUSTERING_SORT_COLUMNS, config.sortColumns);
+    conf.set(FlinkOptions.WRITE_SORT_MEMORY, config.sortMemory);
+    conf.set(FlinkOptions.CLUSTERING_MAX_NUM_GROUPS, config.maxNumGroups);
+    conf.set(FlinkOptions.CLUSTERING_TARGET_PARTITIONS, config.targetPartitions);
+    conf.set(FlinkOptions.CLEAN_ASYNC_ENABLED, config.cleanAsyncEnable);
 
     // use synchronous clustering always
-    conf.setBoolean(FlinkOptions.CLUSTERING_ASYNC_ENABLED, false);
-    conf.setBoolean(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED, config.schedule);
+    conf.set(FlinkOptions.CLUSTERING_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED, config.schedule);
 
     // bulk insert conf
     HoodieTableConfig tableConfig = createMetaClient(conf).getTableConfig();
-    conf.setBoolean(FlinkOptions.URL_ENCODE_PARTITIONING, Boolean.parseBoolean(tableConfig.getUrlEncodePartitioning()));
-    conf.setBoolean(FlinkOptions.HIVE_STYLE_PARTITIONING, Boolean.parseBoolean(tableConfig.getHiveStylePartitioningEnable()));
+    conf.set(FlinkOptions.URL_ENCODE_PARTITIONING, Boolean.parseBoolean(tableConfig.getUrlEncodePartitioning()));
+    conf.set(FlinkOptions.HIVE_STYLE_PARTITIONING, Boolean.parseBoolean(tableConfig.getHiveStylePartitioningEnable()));
 
     return conf;
   }

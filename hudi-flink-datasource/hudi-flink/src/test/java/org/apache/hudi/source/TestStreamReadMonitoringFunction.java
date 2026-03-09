@@ -18,6 +18,7 @@
 
 package org.apache.hudi.source;
 
+import org.apache.hudi.adapter.SourceFunctionAdapter;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
@@ -33,9 +34,9 @@ import org.apache.hudi.utils.TestConfigurations;
 import org.apache.hudi.utils.TestData;
 import org.apache.hudi.utils.TestUtils;
 
+import lombok.Getter;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.util.AbstractStreamOperatorTestHarness;
@@ -64,7 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Test cases for {@link StreamReadMonitoringFunction}.
  */
 public class TestStreamReadMonitoringFunction {
-  private static final long WAIT_TIME_MILLIS = 5 * 1000L;
+  private static final long WAIT_TIME_MILLIS = 10 * 1000L;
 
   private Configuration conf;
 
@@ -75,8 +76,8 @@ public class TestStreamReadMonitoringFunction {
   public void before() throws Exception {
     final String basePath = tempFile.getAbsolutePath();
     conf = TestConfigurations.getDefaultConf(basePath);
-    conf.setString(FlinkOptions.TABLE_TYPE, FlinkOptions.TABLE_TYPE_MERGE_ON_READ);
-    conf.setInteger(FlinkOptions.READ_STREAMING_CHECK_INTERVAL, 2); // check every 2 seconds
+    conf.set(FlinkOptions.TABLE_TYPE, FlinkOptions.TABLE_TYPE_MERGE_ON_READ);
+    conf.set(FlinkOptions.READ_STREAMING_CHECK_INTERVAL, 2); // check every 2 seconds
 
     StreamerUtil.initTableIfNotExists(conf);
   }
@@ -155,7 +156,7 @@ public class TestStreamReadMonitoringFunction {
     // Step1 : create 4 empty commit
     Configuration conf = new Configuration(this.conf);
     conf.set(FlinkOptions.TABLE_TYPE, FlinkOptions.TABLE_TYPE_COPY_ON_WRITE);
-    conf.setBoolean(HoodieWriteConfig.ALLOW_EMPTY_COMMIT.key(), true);
+    conf.setString(HoodieWriteConfig.ALLOW_EMPTY_COMMIT.key(), "true");
 
     TestData.writeData(Collections.EMPTY_LIST, conf);
     TestData.writeData(Collections.EMPTY_LIST, conf);
@@ -199,7 +200,7 @@ public class TestStreamReadMonitoringFunction {
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
     TestData.writeData(TestData.DATA_SET_UPDATE_INSERT, conf);
     String specifiedCommit = TestUtils.getLastCompleteInstant(tempFile.getAbsolutePath());
-    conf.setString(FlinkOptions.READ_START_COMMIT, specifiedCommit);
+    conf.set(FlinkOptions.READ_START_COMMIT, specifiedCommit);
     StreamReadMonitoringFunction function = TestUtils.getMonitorFunc(conf);
     try (AbstractStreamOperatorTestHarness<MergeOnReadInputSplit> harness = createHarness(function)) {
       harness.setup();
@@ -230,7 +231,7 @@ public class TestStreamReadMonitoringFunction {
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
     TestData.writeData(TestData.DATA_SET_UPDATE_INSERT, conf);
     String specifiedCommit = TestUtils.getLastCompleteInstant(tempFile.getAbsolutePath());
-    conf.setString(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
+    conf.set(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
     StreamReadMonitoringFunction function = TestUtils.getMonitorFunc(conf);
     try (AbstractStreamOperatorTestHarness<MergeOnReadInputSplit> harness = createHarness(function)) {
       harness.setup();
@@ -284,7 +285,7 @@ public class TestStreamReadMonitoringFunction {
     String c3 = oriInstants.get(2).requestedTime();
     String c4 = instants.get(1).requestedTime();
 
-    conf.setString(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
+    conf.set(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
     StreamReadMonitoringFunction function = TestUtils.getMonitorFunc(conf);
     try (AbstractStreamOperatorTestHarness<MergeOnReadInputSplit> harness = createHarness(function)) {
       harness.setup();
@@ -409,7 +410,7 @@ public class TestStreamReadMonitoringFunction {
   @Test
   public void testStopWithSavepointAndRestore() throws Exception {
     TestData.writeData(TestData.DATA_SET_INSERT, conf);
-    conf.setString(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
+    conf.set(FlinkOptions.READ_START_COMMIT, FlinkOptions.START_COMMIT_EARLIEST);
     StreamReadMonitoringFunction function = TestUtils.getMonitorFunc(conf);
     OperatorSubtaskState state;
     try (AbstractStreamOperatorTestHarness<MergeOnReadInputSplit> harness = createHarness(function)) {
@@ -462,6 +463,46 @@ public class TestStreamReadMonitoringFunction {
     }
   }
 
+  @Test
+  public void testCheckpointRestoreWithLimit() throws Exception {
+    TestData.writeData(TestData.DATA_SET_INSERT, conf);
+    conf.set(FlinkOptions.READ_SPLITS_LIMIT, 2);
+    StreamReadMonitoringFunction function = TestUtils.getMonitorFunc(conf);
+    OperatorSubtaskState state;
+    try (AbstractStreamOperatorTestHarness<MergeOnReadInputSplit> harness = createHarness(function)) {
+      harness.setup();
+      harness.open();
+      CountDownLatch latch = new CountDownLatch(2);
+      CollectingSourceContext sourceContext = new CollectingSourceContext(latch);
+      runAsync(sourceContext, function);
+      assertTrue(latch.await(WAIT_TIME_MILLIS, TimeUnit.MILLISECONDS), "Should finish splits generation");
+      state = harness.snapshot(1, 1);
+      // Stop the stream task.
+      function.close();
+      assertThat("Should produce the expected splits", sourceContext.getPartitionPaths(), is("par1,par2"));
+      assertTrue(sourceContext.splits.stream().allMatch(split -> split.getInstantRange().isPresent()),
+          "All instants should have range limit");
+    }
+    conf.set(FlinkOptions.READ_SPLITS_LIMIT, Integer.MAX_VALUE);
+    TestData.writeData(TestData.DATA_SET_UPDATE_INSERT, conf);
+    StreamReadMonitoringFunction function2 = TestUtils.getMonitorFunc(conf);
+    try (AbstractStreamOperatorTestHarness<MergeOnReadInputSplit> harness = createHarness(function2)) {
+      harness.setup();
+      // Recover to process the remaining snapshots.
+      harness.initializeState(state);
+      harness.open();
+      CountDownLatch latch = new CountDownLatch(6);
+      CollectingSourceContext sourceContext = new CollectingSourceContext(latch);
+      runAsync(sourceContext, function2);
+      assertTrue(latch.await(WAIT_TIME_MILLIS, TimeUnit.MILLISECONDS), "Should finish splits generation");
+      // Stop the stream task.
+      function2.close();
+      assertThat("Should produce the expected splits", sourceContext.getPartitionPaths(), is("par1,par2,par3,par4"));
+      assertTrue(sourceContext.splits.stream().allMatch(split -> split.getInstantRange().isPresent()),
+          "All the instants should have range limit");
+    }
+  }
+
   private static boolean isPointInstantRange(InstantRange instantRange, String timestamp) {
     return instantRange != null
         && Objects.equals(timestamp, instantRange.getStartInstant().get())
@@ -490,8 +531,9 @@ public class TestStreamReadMonitoringFunction {
   /**
    * Source context that collects the outputs in to a list.
    */
-  private static class CollectingSourceContext implements SourceFunction.SourceContext<MergeOnReadInputSplit> {
+  private static class CollectingSourceContext implements SourceFunctionAdapter.SourceContext<MergeOnReadInputSplit> {
     private final List<MergeOnReadInputSplit> splits = new ArrayList<>();
+    @Getter
     private final Object checkpointLock = new Object();
     private volatile CountDownLatch latch;
 
@@ -518,11 +560,6 @@ public class TestStreamReadMonitoringFunction {
     @Override
     public void markAsTemporarilyIdle() {
 
-    }
-
-    @Override
-    public Object getCheckpointLock() {
-      return checkpointLock;
     }
 
     @Override

@@ -49,7 +49,7 @@ public class TestMultipleMetaSync extends HoodieDeltaStreamerTestBase {
     MockSyncTool2.syncSuccess = false;
     // Initial bulk insert to ingest to first hudi table
     HoodieDeltaStreamer.Config cfg = getConfig(tableBasePath, getSyncNames("MockSyncTool1", "MockSyncTool2"));
-    new HoodieDeltaStreamer(cfg, jsc, fs, hiveServer.getHiveConf()).sync();
+    syncOnce(new HoodieDeltaStreamer(cfg, jsc, fs, hiveServer.getHiveConf()));
     assertTrue(MockSyncTool1.syncSuccess);
     assertTrue(MockSyncTool2.syncSuccess);
   }
@@ -61,7 +61,7 @@ public class TestMultipleMetaSync extends HoodieDeltaStreamerTestBase {
     MockSyncTool1.syncSuccess = false;
     MockSyncTool2.syncSuccess = false;
     HoodieDeltaStreamer.Config cfg = getConfig(tableBasePath, syncClassNames);
-    Exception e = assertThrows(HoodieMetaSyncException.class, () -> new HoodieDeltaStreamer(cfg, jsc, fs, hiveServer.getHiveConf()).sync());
+    Exception e = assertThrows(HoodieMetaSyncException.class, () -> syncOnce(new HoodieDeltaStreamer(cfg, jsc, fs, hiveServer.getHiveConf())));
     assertTrue(e.getMessage().contains(MockSyncToolException1.class.getName()));
     assertTrue(MockSyncTool1.syncSuccess);
     assertTrue(MockSyncTool2.syncSuccess);
@@ -73,7 +73,7 @@ public class TestMultipleMetaSync extends HoodieDeltaStreamerTestBase {
     MockSyncTool1.syncSuccess = false;
     MockSyncTool2.syncSuccess = false;
     HoodieDeltaStreamer.Config cfg = getConfig(tableBasePath, getSyncNames("MockSyncTool1", "MockSyncTool2", "MockSyncToolException1", "MockSyncToolException2"));
-    Exception e = assertThrows(HoodieMetaSyncException.class, () -> new HoodieDeltaStreamer(cfg, jsc, fs, hiveServer.getHiveConf()).sync());
+    Exception e = assertThrows(HoodieMetaSyncException.class, () -> syncOnce(new HoodieDeltaStreamer(cfg, jsc, fs, hiveServer.getHiveConf())));
     assertTrue(e.getMessage().contains(MockSyncToolException1.class.getName()));
     assertTrue(e.getMessage().contains(MockSyncToolException2.class.getName()));
     assertTrue(MockSyncTool1.syncSuccess);
@@ -91,7 +91,7 @@ public class TestMultipleMetaSync extends HoodieDeltaStreamerTestBase {
     cfg.syncClientToolClassNames = syncClassNames;
     cfg.operation = WriteOperationType.BULK_INSERT;
     cfg.enableHiveSync = true;
-    cfg.sourceOrderingField = "timestamp";
+    cfg.sourceOrderingFields = "timestamp";
     cfg.propsFilePath = UtilitiesTestBase.basePath + "/test-source.properties";
     cfg.configs.add("hoodie.datasource.hive_sync.partition_fields=year,month,day");
     cfg.sourceLimit =  1000;

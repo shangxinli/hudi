@@ -1,0 +1,333 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.spark.sql.avro
+
+import org.apache.hudi.common.schema.HoodieSchema.TimePrecision
+import org.apache.hudi.common.schema.{HoodieJsonProperties, HoodieSchema, HoodieSchemaField, HoodieSchemaType}
+import org.apache.hudi.internal.schema.HoodieSchemaException
+import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.sql.types.Decimal.minBytesForPrecision
+import org.apache.spark.sql.types._
+
+import scala.collection.JavaConverters._
+
+/**
+ * This object contains methods that are used to convert HoodieSchema to Spark SQL schemas and vice versa.
+ *
+ * This provides direct conversion between HoodieSchema and Spark DataType
+ * without going through Avro Schema intermediary.
+ *
+ * NOTE: the package of this class is intentionally kept as "org.apache.spark.sql.avro" which is similar to the existing
+ * Spark Avro connector's SchemaConverters.scala
+ * (https://github.com/apache/spark/blob/master/connector/avro/src/main/scala/org/apache/spark/sql/avro/SchemaConverters.scala).
+ * The reason for this is so that Spark 3.3 is able to access private spark sql type classes like TimestampNTZType.
+ */
+
+@DeveloperApi
+object HoodieSparkSchemaConverters {
+
+  /**
+   * Internal wrapper for SQL data type and nullability.
+   */
+  case class SchemaType(dataType: DataType, nullable: Boolean, metadata: Option[Metadata] = None)
+
+  def toSqlType(hoodieSchema: HoodieSchema): (DataType, Boolean) = {
+    val result = toSqlTypeHelper(hoodieSchema, Set.empty)
+    (result.dataType, result.nullable)
+  }
+
+  def toHoodieType(catalystType: DataType,
+                   nullable: Boolean = false,
+                   recordName: String = "topLevelRecord",
+                   nameSpace: String = "",
+                   metadata: Metadata = Metadata.empty): HoodieSchema = {
+    val schema = catalystType match {
+      // Primitive types
+      case BooleanType => HoodieSchema.create(HoodieSchemaType.BOOLEAN)
+      case ByteType | ShortType | IntegerType => HoodieSchema.create(HoodieSchemaType.INT)
+      case LongType => HoodieSchema.create(HoodieSchemaType.LONG)
+      case DateType => HoodieSchema.createDate()
+      case TimestampType => HoodieSchema.createTimestampMicros()
+      case TimestampNTZType => HoodieSchema.createLocalTimestampMicros()
+      case FloatType => HoodieSchema.create(HoodieSchemaType.FLOAT)
+      case DoubleType => HoodieSchema.create(HoodieSchemaType.DOUBLE)
+      case StringType | _: CharType | _: VarcharType => HoodieSchema.create(HoodieSchemaType.STRING)
+      case NullType => HoodieSchema.create(HoodieSchemaType.NULL)
+      case BinaryType => HoodieSchema.create(HoodieSchemaType.BYTES)
+
+      case d: DecimalType =>
+        val fixedSize = minBytesForPrecision(d.precision)
+        val name = nameSpace match {
+          case "" => s"$recordName.fixed"
+          case _ => s"$nameSpace.$recordName.fixed"
+        }
+        HoodieSchema.createDecimal(name, nameSpace, null, d.precision, d.scale, fixedSize)
+
+      // Complex types
+      case ArrayType(elementSparkType, containsNull)
+          if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
+            HoodieSchema.parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.VECTOR =>
+        if (containsNull) {
+          throw new HoodieSchemaException(
+            s"VECTOR type does not support nullable elements (field: $recordName)")
+        }
+
+        val vectorSchema = HoodieSchema
+          .parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+          .asInstanceOf[HoodieSchema.Vector]
+        val dimension = vectorSchema.getDimension
+
+        val elementType = vectorSchema.getVectorElementType
+
+        val expectedSparkType = sparkTypeForVectorElementType(elementType)
+        if (elementSparkType != expectedSparkType) {
+          throw new HoodieSchemaException(
+            s"VECTOR element type mismatch for field $recordName: metadata requires $elementType, Spark array has $elementSparkType")
+        }
+
+        HoodieSchema.createVector(dimension, elementType)
+
+      case ArrayType(elementType, containsNull) =>
+        val elementSchema = toHoodieType(elementType, containsNull, recordName, nameSpace, metadata)
+        HoodieSchema.createArray(elementSchema)
+
+      case MapType(StringType, valueType, valueContainsNull) =>
+        val valueSchema = toHoodieType(valueType, valueContainsNull, recordName, nameSpace, metadata)
+        HoodieSchema.createMap(valueSchema)
+
+      case blobStruct: StructType if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
+        HoodieSchema.parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.BLOB =>
+        // Validate blob structure before accepting
+        validateBlobStructure(blobStruct)
+        HoodieSchema.createBlob()
+      case st: StructType =>
+        val childNameSpace = if (nameSpace != "") s"$nameSpace.$recordName" else recordName
+
+        // Check if this might be a union (using heuristic like Avro converter)
+        if (canBeUnion(st)) {
+          val nonNullUnionFieldTypes = st.map { f =>
+            toHoodieType(f.dataType, nullable = false, f.name, childNameSpace, f.metadata)
+          }
+          val unionFieldTypes = if (nullable) {
+            (HoodieSchema.create(HoodieSchemaType.NULL) +: nonNullUnionFieldTypes).asJava
+          } else {
+            nonNullUnionFieldTypes.asJava
+          }
+          HoodieSchema.createUnion(unionFieldTypes)
+        } else {
+          // Create record
+          val fields = st.map { f =>
+            val fieldSchema = toHoodieType(f.dataType, f.nullable, f.name, childNameSpace, f.metadata)
+            val doc = f.getComment.orNull
+            // Match existing Avro SchemaConverters behavior: use NULL_VALUE for nullable unions
+            // to avoid serializing "default":null in JSON representation
+            val defaultVal = if (fieldSchema.isNullable) {
+              HoodieJsonProperties.NULL_VALUE
+            } else {
+              null
+            }
+            HoodieSchemaField.of(f.name, fieldSchema, doc, defaultVal)
+          }
+
+          HoodieSchema.createRecord(recordName, nameSpace, null, fields.asJava)
+        }
+
+      case other => throw new IncompatibleSchemaException(s"Unexpected Spark DataType: $other")
+    }
+
+    // Wrap with null union if nullable (and not already a union)
+    if (nullable && catalystType != NullType && schema.getType != HoodieSchemaType.UNION) {
+      HoodieSchema.createNullable(schema)
+    } else {
+      schema
+    }
+  }
+
+  private def toSqlTypeHelper(hoodieSchema: HoodieSchema, existingRecordNames: Set[String]): SchemaType = {
+    hoodieSchema.getType match {
+      // Primitive types
+      case HoodieSchemaType.INT => SchemaType(IntegerType, nullable = false)
+      case HoodieSchemaType.STRING | HoodieSchemaType.ENUM => SchemaType(StringType, nullable = false)
+      case HoodieSchemaType.BOOLEAN => SchemaType(BooleanType, nullable = false)
+      case HoodieSchemaType.BYTES | HoodieSchemaType.FIXED => SchemaType(BinaryType, nullable = false)
+      case HoodieSchemaType.DOUBLE => SchemaType(DoubleType, nullable = false)
+      case HoodieSchemaType.FLOAT => SchemaType(FloatType, nullable = false)
+      case HoodieSchemaType.LONG => SchemaType(LongType, nullable = false)
+      case HoodieSchemaType.NULL => SchemaType(NullType, nullable = true)
+
+      // Logical types
+      case HoodieSchemaType.DATE =>
+        SchemaType(DateType, nullable = false)
+
+      case HoodieSchemaType.TIMESTAMP =>
+        hoodieSchema match {
+          case ts: HoodieSchema.Timestamp if !ts.isUtcAdjusted =>
+            SchemaType(TimestampNTZType, nullable = false)
+          case _ =>
+            SchemaType(TimestampType, nullable = false)
+        }
+
+      case HoodieSchemaType.DECIMAL =>
+        hoodieSchema match {
+          case dec: HoodieSchema.Decimal =>
+            SchemaType(DecimalType(dec.getPrecision, dec.getScale), nullable = false)
+          case _ =>
+            throw new IncompatibleSchemaException(
+              s"DECIMAL type must be HoodieSchema.Decimal instance, got: ${hoodieSchema.getClass}")
+        }
+
+      case HoodieSchemaType.TIME =>
+        hoodieSchema match {
+          case time: HoodieSchema.Time =>
+            time.getPrecision match {
+              case TimePrecision.MILLIS => SchemaType(IntegerType, nullable = false)
+              case TimePrecision.MICROS => SchemaType(LongType, nullable = false)
+            }
+          case _ =>
+            throw new IncompatibleSchemaException(
+              s"TIME type must be HoodieSchema.Time instance, got: ${hoodieSchema.getClass}")
+        }
+
+      case HoodieSchemaType.UUID =>
+        SchemaType(StringType, nullable = false)
+
+      // Complex types
+      case HoodieSchemaType.VECTOR =>
+        val vectorSchema = hoodieSchema.asInstanceOf[HoodieSchema.Vector]
+        val metadata = new MetadataBuilder()
+          .putString(HoodieSchema.TYPE_METADATA_FIELD, vectorSchema.toTypeDescriptor)
+          .build()
+
+        val sparkElementType = sparkTypeForVectorElementType(vectorSchema.getVectorElementType)
+        SchemaType(ArrayType(sparkElementType, containsNull = false), nullable = false, Some(metadata))
+
+      case HoodieSchemaType.BLOB | HoodieSchemaType.RECORD =>
+        val fullName = hoodieSchema.getFullName
+        if (existingRecordNames.contains(fullName)) {
+          throw new IncompatibleSchemaException(
+            s"""
+               |Found recursive reference in HoodieSchema, which cannot be processed by Spark:
+               |$fullName
+             """.stripMargin)
+        }
+        val newRecordNames = existingRecordNames + fullName
+        val fields = hoodieSchema.getFields.asScala.map { f =>
+          val schemaType = toSqlTypeHelper(f.schema(), newRecordNames)
+          val fieldSchema = f.getNonNullSchema
+          val metadataBuilder = new MetadataBuilder()
+            .withMetadata(schemaType.metadata.getOrElse(Metadata.empty))
+          if (f.doc().isPresent && f.doc().get().nonEmpty) {
+            metadataBuilder.putString("comment", f.doc().get())
+          }
+          if (fieldSchema.isBlobField) {
+            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchema.Blob.TYPE_DESCRIPTOR)
+          }
+          val metadata = metadataBuilder.build()
+          StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
+        }
+        // For BLOB types, propagate type metadata via SchemaType
+        val schemaTypeMetadata = if (hoodieSchema.getType == HoodieSchemaType.BLOB) {
+          Some(new MetadataBuilder()
+            .putString(HoodieSchema.TYPE_METADATA_FIELD, hoodieSchema.asInstanceOf[HoodieSchema.Blob].toTypeDescriptor)
+            .build())
+        } else {
+          None
+        }
+        SchemaType(StructType(fields.toSeq), nullable = false, schemaTypeMetadata)
+
+      case HoodieSchemaType.ARRAY =>
+        val elementSchema = hoodieSchema.getElementType
+        val schemaType = toSqlTypeHelper(elementSchema, existingRecordNames)
+        SchemaType(ArrayType(schemaType.dataType, containsNull = schemaType.nullable), nullable = false)
+
+      case HoodieSchemaType.MAP =>
+        val valueSchema = hoodieSchema.getValueType
+        val schemaType = toSqlTypeHelper(valueSchema, existingRecordNames)
+        SchemaType(MapType(StringType, schemaType.dataType, valueContainsNull = schemaType.nullable), nullable = false)
+
+      case HoodieSchemaType.UNION =>
+        if (hoodieSchema.isNullable) {
+          // Union with null - extract non-null type and mark as nullable
+          val types = hoodieSchema.getTypes.asScala
+          val remainingTypes = types.filter(_.getType != HoodieSchemaType.NULL)
+          if (remainingTypes.size == 1) {
+            toSqlTypeHelper(remainingTypes.head, existingRecordNames).copy(nullable = true)
+          } else {
+            toSqlTypeHelper(HoodieSchema.createUnion(remainingTypes.asJava), existingRecordNames)
+              .copy(nullable = true)
+          }
+        } else {
+          // Union without null - handle type promotions and member structs
+          val types = hoodieSchema.getTypes.asScala
+          types.map(_.getType).toSeq match {
+            case Seq(t) =>
+              toSqlTypeHelper(types.head, existingRecordNames)
+            case Seq(t1, t2) if Set(t1, t2) == Set(HoodieSchemaType.INT, HoodieSchemaType.LONG) =>
+              SchemaType(LongType, nullable = false)
+            case Seq(t1, t2) if Set(t1, t2) == Set(HoodieSchemaType.FLOAT, HoodieSchemaType.DOUBLE) =>
+              SchemaType(DoubleType, nullable = false)
+            case _ =>
+              // Convert to struct with member0, member1, ... fields (like Avro union handling)
+              val fields = types.zipWithIndex.map {
+                case (s, i) =>
+                  val schemaType = toSqlTypeHelper(s, existingRecordNames)
+                  StructField(s"member$i", schemaType.dataType, nullable = true)
+              }
+              SchemaType(StructType(fields.toSeq), nullable = false)
+          }
+        }
+
+      case other => throw new IncompatibleSchemaException(s"Unsupported HoodieSchemaType: $other")
+    }
+  }
+
+  private lazy val expectedBlobStructType: StructType = toSqlType(HoodieSchema.createBlob())._1.asInstanceOf[StructType]
+
+  /**
+   * Validates that a StructType matches the expected blob schema structure defined in {@link HoodieSchema.Blob}.
+   *
+   * @param structType the StructType to validate
+   * @throws IllegalArgumentException if the structure does not match the expected blob schema
+   */
+  private def validateBlobStructure(structType: StructType): Unit = {
+    if (!structType.equals(expectedBlobStructType)) {
+      throw new IllegalArgumentException(
+        s"""Invalid blob schema structure. Expected schema:
+           |${expectedBlobStructType.toDDL}
+           |Got schema:
+           |${structType.toDDL}""".stripMargin)
+    }
+  }
+
+  private def canBeUnion(st: StructType): Boolean = {
+    st.fields.length > 0 &&
+      st.forall { f =>
+        f.name.matches("member\\d+") && f.nullable
+      }
+  }
+
+  private def sparkTypeForVectorElementType(
+      elementType: HoodieSchema.Vector.VectorElementType): DataType = elementType match {
+    case HoodieSchema.Vector.VectorElementType.FLOAT => FloatType
+    case HoodieSchema.Vector.VectorElementType.DOUBLE => DoubleType
+    case HoodieSchema.Vector.VectorElementType.INT8 => ByteType
+  }
+}
+
+private[avro] class IncompatibleSchemaException(msg: String, ex: Throwable = null) extends Exception(msg, ex)

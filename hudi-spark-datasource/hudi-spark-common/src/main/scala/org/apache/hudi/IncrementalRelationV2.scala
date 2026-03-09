@@ -22,6 +22,7 @@ import org.apache.hudi.HoodieBaseRelation.isSchemaEvolutionEnabledOnRead
 import org.apache.hudi.client.utils.SparkInternalSchemaConverter
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.{HoodieCommitMetadata, HoodieFileFormat, HoodieRecord}
+import org.apache.hudi.common.schema.HoodieSchemaType
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.common.table.log.InstantRange.RangeType
 import org.apache.hudi.common.table.read.IncrementalQueryAnalyzer
@@ -33,7 +34,6 @@ import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.internal.schema.utils.SerDeHelper
 import org.apache.hudi.storage.{HoodieStorageUtils, StoragePath}
 
-import org.apache.avro.Schema
 import org.apache.hadoop.fs.GlobPattern
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, DataFrame, Row, SQLContext}
@@ -107,16 +107,16 @@ class IncrementalRelationV2(val sqlContext: SQLContext,
     }
 
     val tableSchema = if (useEndInstantSchema && iSchema.isEmptySchema) {
-      if (commitsToReturn.isEmpty) schemaResolver.getTableAvroSchema(false) else
-        schemaResolver.getTableAvroSchema(commitsToReturn.last, false)
+      if (commitsToReturn.isEmpty) schemaResolver.getTableSchema(false) else
+        schemaResolver.getTableSchema(commitsToReturn.last, false)
     } else {
-      schemaResolver.getTableAvroSchema(false)
+      schemaResolver.getTableSchema(false)
     }
-    if (tableSchema.getType == Schema.Type.NULL) {
+    if (tableSchema.getType == HoodieSchemaType.NULL) {
       // if there is only one commit in the table and is an empty commit without schema, return empty RDD here
       (StructType(Nil), InternalSchema.getEmptyInternalSchema)
     } else {
-      val dataSchema = AvroConversionUtils.convertAvroSchemaToStructType(tableSchema)
+      val dataSchema = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(tableSchema)
       if (iSchema != null && !iSchema.isEmptySchema) {
         // if internalSchema is ready, dataSchema will contains skeletonSchema
         (dataSchema, iSchema)
@@ -205,7 +205,13 @@ class IncrementalRelationV2(val sqlContext: SQLContext,
       val sOpts = optParams.filter(p => !p._1.equalsIgnoreCase("path"))
 
       val startInstantArchived = !queryContext.getArchivedInstants.isEmpty
-      val endInstantTime = queryContext.getEndInstant.get()
+      if (queryContext.isEmpty) {
+        // no commits to read
+        // scalastyle:off return
+        return sqlContext.sparkContext.emptyRDD[Row]
+        // scalastyle:on return
+      }
+      val endInstantTime = queryContext.getLastInstant
 
       val scanDf = if (fallbackToFullTableScan && startInstantArchived) {
         log.info(s"Falling back to full table scan as startInstantArchived: $startInstantArchived")
@@ -263,7 +269,7 @@ class IncrementalRelationV2(val sqlContext: SQLContext,
                   .load(filteredRegularFullPaths.toList: _*)
                   .filter(col(HoodieRecord.COMMIT_TIME_METADATA_FIELD).isin(commitTimesToReturn: _*)))
               } catch {
-                case e : AnalysisException =>
+                case e: AnalysisException =>
                   if (e.getMessage.contains("Path does not exist")) {
                     throw new HoodieIncrementalPathNotFoundException(e)
                   } else {

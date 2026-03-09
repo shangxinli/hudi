@@ -26,12 +26,11 @@ import org.apache.hudi.exception.HoodieHeartbeatException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.storage.StoragePath;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.configuration.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -63,10 +62,9 @@ import static org.apache.hudi.common.table.HoodieTableMetaClient.AUXILIARYFOLDER
  * <p>NOTE: Due to CPU contention on the driver/client node, the heartbeats could be delayed, hence it's important to set
  * the value high enough to avoid that possibility.
  */
+@Slf4j
 public class ClientIds implements AutoCloseable, Serializable {
   private static final long serialVersionUID = 1L;
-
-  private static final Logger LOG = LoggerFactory.getLogger(ClientIds.class);
 
   private static final String HEARTBEAT_FOLDER_NAME = ".ids";
   private static final String HEARTBEAT_FILE_NAME_PREFIX = "_";
@@ -107,7 +105,7 @@ public class ClientIds implements AutoCloseable, Serializable {
 
   public void start() {
     if (started) {
-      LOG.info("The service heartbeat client is already started, skips the action");
+      log.info("The service heartbeat client is already started, skips the action");
     }
     updateHeartbeat();
     this.executor = Executors.newScheduledThreadPool(1);
@@ -140,7 +138,7 @@ public class ClientIds implements AutoCloseable, Serializable {
       }
     } catch (IOException e) {
       // if any exception happens, just return false.
-      LOG.error("Check heartbeat file existence error: " + path);
+      log.error("Check heartbeat file existence error: " + path);
     }
     return false;
   }
@@ -172,7 +170,7 @@ public class ClientIds implements AutoCloseable, Serializable {
 
   @VisibleForTesting
   public String nextId(Configuration conf) {
-    String basePath = conf.getString(FlinkOptions.PATH);
+    String basePath = conf.get(FlinkOptions.PATH);
     String nextId = nextId(conf, basePath);
     // update the heartbeat immediately in case there are client preemption conflict for the same id.
     updateHeartbeat(getHeartbeatFilePath(basePath, nextId));
@@ -200,7 +198,7 @@ public class ClientIds implements AutoCloseable, Serializable {
         // 1. If there are any zombie client ids, reuse the smallest one
         for (Path path : zombieHeartbeatPaths) {
           fs.delete(path, true);
-          LOG.warn("Delete inactive ckp metadata path: " + path);
+          log.warn("Deleting inactive checkpoint metadata path: {}", path);
         }
         return getClientId(zombieHeartbeatPaths.get(0));
       }
@@ -251,9 +249,9 @@ public class ClientIds implements AutoCloseable, Serializable {
     }
 
     public Builder conf(Configuration conf) {
-      this.basePath = conf.getString(FlinkOptions.PATH);
+      this.basePath = conf.get(FlinkOptions.PATH);
       this.fs = HadoopFSUtils.getFs(this.basePath, HadoopConfigurations.getHadoopConf(conf));
-      this.clientId = conf.getString(FlinkOptions.WRITE_CLIENT_ID);
+      this.clientId = conf.get(FlinkOptions.WRITE_CLIENT_ID);
       return this;
     }
 

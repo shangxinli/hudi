@@ -29,11 +29,17 @@ import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.InProcessTimeGenerator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.common.model.HoodieIndexDefinition;
+import org.apache.hudi.metadata.HoodieIndexVersion;
+import org.apache.hudi.metadata.MetadataPartitionType;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.data.HoodieJavaRDD;
 import org.apache.hudi.metadata.HoodieBackedTableMetadataWriter;
@@ -47,6 +53,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -71,7 +78,7 @@ public class TestMetadataWriterCommit extends BaseTestHandle {
         .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder().withRemoteServerPort(timelineServicePort).build())
         .withMetadataConfig(HoodieMetadataConfig.newBuilder()
             .enable(true)
-            .withEnableRecordIndex(true)
+            .withEnableGlobalRecordLevelIndex(true)
             .withMetadataIndexColumnStats(false)
             .withSecondaryIndexEnabled(false)
             .withStreamingWriteEnabled(true)
@@ -122,7 +129,7 @@ public class TestMetadataWriterCommit extends BaseTestHandle {
     assertEquals(10, mdtCommitMetadata.getPartitionToWriteStats().get(RECORD_INDEX.getPartitionPath()).size());
     assertFalse(mdtCommitMetadata.getPartitionToWriteStats().containsKey(COLUMN_STATS.getPartitionPath()));
 
-    // Create commit in MDT with col stats enabled
+    // Create commit in MDT with col stats enabled (partition stats is enabled with column stats)
     config.getMetadataConfig().setValue(HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS, "true");
     instantTime = InProcessTimeGenerator.createNewInstantTime();
     mdtWriter = (HoodieBackedTableMetadataWriter) SparkMetadataWriterFactory.createWithStreamingWrites(storageConf, config,
@@ -131,8 +138,8 @@ public class TestMetadataWriterCommit extends BaseTestHandle {
     mdtWriteStatus = mdtWriter.streamWriteToMetadataPartitions(HoodieJavaRDD.of(Collections.singletonList(writeStatus), context, 1), instantTime);
     mdtWriteStats = mdtWriteStatus.collectAsList().stream().map(WriteStatus::getStat).collect(Collectors.toList());
     mdtWriter.completeStreamingCommit(instantTime, context, mdtWriteStats, commitMetadata);
-    // 3 bootstrap commits for 3 enabled partitions, 2 commits due to update
-    assertEquals(5, mdtMetaClient.reloadActiveTimeline().filterCompletedInstants().countInstants());
+    // 3 bootstrap commits for 4 enabled partitions, 2 commits due to update
+    assertEquals(6, mdtMetaClient.reloadActiveTimeline().filterCompletedInstants().countInstants());
 
     // Verify commit metadata
     mdtCommitMetadata = mdtMetaClient.getActiveTimeline().readCommitMetadata(mdtMetaClient.getActiveTimeline().lastInstant().get());
@@ -174,7 +181,7 @@ public class TestMetadataWriterCommit extends BaseTestHandle {
         .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder().withRemoteServerPort(timelineServicePort).build())
         .withMetadataConfig(HoodieMetadataConfig.newBuilder()
             .enable(true)
-            .withEnableRecordIndex(true)
+            .withEnableGlobalRecordLevelIndex(true)
             .withMetadataIndexColumnStats(false)
             .withSecondaryIndexEnabled(true)
             .withSecondaryIndexName("sec-rider")
@@ -184,15 +191,32 @@ public class TestMetadataWriterCommit extends BaseTestHandle {
         .build();
     config.setSchema(TRIP_EXAMPLE_SCHEMA);
 
+    // Just replicating the production code path to create the metadata table
+    metaClient = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build();
+
+    HoodieIndexDefinition indexDefinition = HoodieIndexDefinition.newBuilder()
+        .withIndexName("secondary_index_sec-rider")  // matches PARTITION_NAME_SECONDARY_INDEX_PREFIX + indexName
+        .withIndexType("secondary_index")
+        .withSourceFields(Collections.singletonList("rider"))
+        .withIndexOptions(Collections.emptyMap())
+        .withVersion(HoodieIndexVersion.getCurrentVersion(metaClient.getTableConfig().getTableVersion(), MetadataPartitionType.SECONDARY_INDEX))
+        .build();
+
+    metaClient.buildIndexDefinition(indexDefinition);
+
+    Properties indexProps = new Properties();
+    indexProps.setProperty(HoodieTableConfig.RELATIVE_INDEX_DEFINITION_PATH.key(), 
+        FSUtils.getRelativePartitionPath(metaClient.getBasePath(), new StoragePath(metaClient.getIndexDefinitionPath())));
+    HoodieTableConfig.update(metaClient.getStorage(), metaClient.getMetaPath(), indexProps);
+
+    metaClient = HoodieTableMetaClient.reload(metaClient);
+
     // create mdt writer
     HoodieBackedTableMetadataWriter mdtWriter = (HoodieBackedTableMetadataWriter) SparkMetadataWriterFactory.createWithStreamingWrites(storageConf, config,
         HoodieFailedWritesCleaningPolicy.LAZY, context, Option.empty());
     HoodieTableMetaClient mdtMetaClient = HoodieTableMetaClient.builder().setBasePath(metaClient.getMetaPath() + "/metadata").setConf(storageConf).build();
     // 3 bootstrapped MDT partitions - files, record index and secondary index
     assertEquals(3, mdtMetaClient.getActiveTimeline().filterCompletedInstants().countInstants());
-
-    metaClient = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build();
-    metaClient.getTableConfig().setValue(HoodieTableConfig.RELATIVE_INDEX_DEFINITION_PATH, metaClient.getIndexDefinitionPath());
     table = HoodieSparkTable.create(config, context, metaClient);
     dataGenerator = new HoodieTestDataGenerator(new String[] {partitionPath});
     // create a parquet file and obtain corresponding write status
@@ -220,7 +244,8 @@ public class TestMetadataWriterCommit extends BaseTestHandle {
     assertEquals(3, mdtCommitMetadata.getPartitionToWriteStats().size());
     assertEquals(1, mdtCommitMetadata.getPartitionToWriteStats().get(FILES.getPartitionPath()).size());
     assertEquals(10, mdtCommitMetadata.getPartitionToWriteStats().get(RECORD_INDEX.getPartitionPath()).size());
-    assertEquals(10, mdtCommitMetadata.getPartitionToWriteStats().get(SECONDARY_INDEX.getPartitionPath()
+    assertEquals(metaClient.getTableConfig().getTableVersion().equals(HoodieTableVersion.NINE) ? 1 : 10,
+        mdtCommitMetadata.getPartitionToWriteStats().get(SECONDARY_INDEX.getPartitionPath()
         + config.getMetadataConfig().getSecondaryIndexName()).size());
   }
 

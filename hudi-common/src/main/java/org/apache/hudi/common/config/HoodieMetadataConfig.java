@@ -18,6 +18,7 @@
 
 package org.apache.hudi.common.config;
 
+import org.apache.hudi.common.bloom.BloomFilterTypeCode;
 import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.util.Option;
@@ -80,6 +81,15 @@ public final class HoodieMetadataConfig extends HoodieConfig {
           + "in streaming manner rather than two disjoint writes. By default "
           + "streaming writes to metadata table is enabled for SPARK engine for incremental operations and disabled for all other cases.");
 
+  public static final ConfigProperty<Integer> STREAMING_WRITE_DATATABLE_WRITE_STATUSES_COALESCE_DIVISOR = ConfigProperty
+      .key(METADATA_PREFIX + ".streaming.write.datatable.write.statuses.coalesce.divisor")
+      .defaultValue(5000)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("When streaming writes to metadata table is enabled via hoodie.metadata.streaming.write.enabled, the data table write statuses are unioned "
+          + "with metadata table write statuses before triggering the entire write dag. The data table write statuses will be coalesce down to the number of write statuses "
+          + "divided by the specified divisor to avoid triggering thousands of no-op tasks for the data table writes which have their status cached.");
+
   public static final boolean DEFAULT_METADATA_ENABLE_FOR_READERS = true;
 
   // Enable metrics for internal Metadata Table
@@ -106,6 +116,26 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .sinceVersion("0.7.0")
       .withDocumentation("Controls how often the metadata table is compacted.");
 
+  // Max number of seconds before compaction occurs
+  public static final ConfigProperty<String> COMPACT_TIME_DELTA_SECONDS = ConfigProperty
+      .key(METADATA_PREFIX + ".compact.max.delta.seconds")
+      .defaultValue(String.valueOf(2 * 60 * 60))
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Number of elapsed seconds after the last compaction, before scheduling a "
+      + "new one (for metadata table). "
+      + "This config takes effect only for the compaction triggering strategy based on the elapsed time, "
+      + "i.e., TIME_ELAPSED, NUM_AND_TIME, and NUM_OR_TIME.");
+
+  // Compaction trigger strategy
+  public static final ConfigProperty<String> COMPACT_TRIGGER_STRATEGY = ConfigProperty
+      .key(METADATA_PREFIX +  ".compact.trigger.strategy")
+      .defaultValue("NUM_COMMITS")
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Controls how compaction scheduling is triggered for metadata table,"
+      + "by time or num delta commits or combination of both. ");
+
   public static final ConfigProperty<String> ENABLE_LOG_COMPACTION_ON_METADATA_TABLE = ConfigProperty
       .key(METADATA_PREFIX + ".log.compaction.enable")
       .defaultValue("false")
@@ -120,6 +150,13 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Controls the criteria to log compacted files groups in metadata table.");
+
+  public static final ConfigProperty<Boolean> DERIVE_FROM_DATA_TABLE_CLEAN_POLICY = ConfigProperty
+      .key(METADATA_PREFIX + ".derive.from.datatable.clean.policy")
+      .defaultValue(true)
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("This config determines whether the cleaner policy should use data table's cleaner policy.");
 
   // Regex to filter out matching directories during bootstrap
   public static final ConfigProperty<String> DIR_FILTER_REGEX = ConfigProperty
@@ -166,7 +203,9 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .sinceVersion("0.11.0")
       .withDocumentation("Enable indexing column ranges of user data files under metadata table key lookups. When "
           + "enabled, metadata table will have a partition to store the column ranges and will be "
-          + "used for pruning files during the index lookups.");
+          + "used for pruning files during the index lookups. "
+          + "For the Spark engine, this config defaults to true (enabled), overriding the base default of false. "
+          + "For Flink and Java engines, this remains false by default.");
 
   public static final ConfigProperty<Integer> METADATA_INDEX_COLUMN_STATS_FILE_GROUP_COUNT = ConfigProperty
       .key(METADATA_PREFIX + ".index.column.stats.file.group.count")
@@ -189,7 +228,12 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .noDefaultValue()
       .markAdvanced()
       .sinceVersion("0.11.0")
-      .withDocumentation("Comma-separated list of columns for which column stats index will be built. If not set, all columns will be indexed");
+      .withDocumentation("Comma-separated list of columns for which column stats index will be built. "
+          + "If not set, all columns will be indexed. "
+          + "For nested fields within ARRAY types, use: field.list.element "
+          + "(e.g., items.list.element or items.list.element.price). "
+          + "For nested fields within MAP types, use: field.key_value.key for keys or field.key_value.value for values "
+          + "(e.g., metadata.key_value.key, metadata.key_value.value, or metadata.key_value.value.nested_field).");
 
   public static final ConfigProperty<Integer> COLUMN_STATS_INDEX_MAX_COLUMNS = ConfigProperty
       .key(METADATA_PREFIX + ".index.column.stats.max.columns.to.index")
@@ -264,30 +308,57 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .withDocumentation("When there is a pending instant in data table, this config limits the allowed number of deltacommits in metadata table to "
           + "prevent the metadata table's timeline from growing unboundedly as compaction won't be triggered due to the pending data table instant.");
 
-  public static final ConfigProperty<Boolean> RECORD_INDEX_ENABLE_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".record.index.enable")
+  public static final ConfigProperty<Boolean> GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".global.record.level.index.enable")
       .defaultValue(false)
+      .withAlternatives(METADATA_PREFIX + ".record.index.enable")
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Create the HUDI Record Index within the Metadata Table");
 
-  public static final ConfigProperty<Integer> RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".record.index.min.filegroup.count")
+  public static final ConfigProperty<Boolean> RECORD_LEVEL_INDEX_ENABLE_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".record.level.index.enable")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Create the HUDI Record Index within the Metadata Table for a partitioned dataset where a "
+          + "pair of partition path and record key is unique across the entire table");
+
+  public static final ConfigProperty<Integer> GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".global.record.level.index.min.filegroup.count")
       .defaultValue(10)
+      .withAlternatives(METADATA_PREFIX + ".record.index.min.filegroup.count")
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Minimum number of file groups to use for Record Index.");
 
-  public static final ConfigProperty<Integer> RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".record.index.max.filegroup.count")
+  public static final ConfigProperty<Integer> GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".global.record.level.index.max.filegroup.count")
       .defaultValue(10000)
+      .withAlternatives(METADATA_PREFIX + ".record.index.max.filegroup.count")
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Maximum number of file groups to use for Record Index.");
 
-  public static final ConfigProperty<Integer> RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP = ConfigProperty
+  public static final ConfigProperty<Integer> RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".record.level.index.min.filegroup.count")
+      .defaultValue(1)
+      .withAlternatives(METADATA_PREFIX + ".partitioned.record.index.min.filegroup.count")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Minimum number of file groups to use for Partitioned Record Index.");
+
+  public static final ConfigProperty<Integer> RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".record.level.index.max.filegroup.count")
+      .defaultValue(10)
+      .withAlternatives(METADATA_PREFIX + ".partitioned.record.index.max.filegroup.count")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Maximum number of file groups to use for Partitioned Record Index.");
+
+  public static final ConfigProperty<Long> RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP = ConfigProperty
       .key(METADATA_PREFIX + ".record.index.max.filegroup.size")
-      .defaultValue(1024 * 1024 * 1024)
+      .defaultValue(1024 * 1024 * 1024L)
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Maximum size in bytes of a single file group. Large file group takes longer to compact.");
@@ -388,21 +459,6 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .sinceVersion("1.0.1")
       .withDocumentation("Options for the expression index, e.g. \"expr='from_unixtime', format='yyyy-MM-dd'\"");
 
-  public static final ConfigProperty<Boolean> ENABLE_METADATA_INDEX_PARTITION_STATS = ConfigProperty
-      .key(METADATA_PREFIX + ".index.partition.stats.enable")
-      // The defaultValue(false) here is the initial default, but it's overridden later based on
-      // column stats setting.
-      .defaultValue(false)
-      .sinceVersion("1.0.0")
-      .withDocumentation("Enable aggregating stats for each column at the storage partition level. "
-          + "Enabling this can improve query performance by leveraging partition and column stats "
-          + "for (partition) filtering. "
-          + "Important: The default value for this configuration is dynamically set based on the "
-          + "effective value of " + ENABLE_METADATA_INDEX_COLUMN_STATS.key() + ". If column stats "
-          + "index is enabled (default for Spark engine), partition stats indexing will also be "
-          + "enabled by default. Conversely, if column stats indexing is disabled (default for "
-          + "Flink and Java engines), partition stats indexing will also be disabled by default.");
-
   public static final ConfigProperty<Integer> METADATA_INDEX_PARTITION_STATS_FILE_GROUP_COUNT = ConfigProperty
       .key(METADATA_PREFIX + ".index.partition.stats.file.group.count")
       .defaultValue(1)
@@ -455,6 +511,130 @@ public final class HoodieMetadataConfig extends HoodieConfig {
           + "The index name either starts with or matches exactly can be one of the following: "
           + StringUtils.join(Arrays.stream(MetadataPartitionType.values()).map(MetadataPartitionType::getPartitionPath).collect(Collectors.toList()), ", "));
 
+  // Range-based repartitioning configuration for metadata table lookups
+  public static final ConfigProperty<Double> RANGE_REPARTITION_SAMPLING_FRACTION = ConfigProperty
+      .key(METADATA_PREFIX + ".range.repartition.sampling.fraction")
+      .defaultValue(0.01)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Sampling fraction used for range-based repartitioning during metadata table lookups. "
+          + "This controls the accuracy vs performance trade-off for key distribution sampling.");
+
+  public static final ConfigProperty<Integer> RANGE_REPARTITION_TARGET_RECORDS_PER_PARTITION = ConfigProperty
+      .key(METADATA_PREFIX + ".range.repartition.target.records.per.partition")
+      .defaultValue(10000)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Target number of records per partition during range-based repartitioning. "
+          + "This helps control the size of each partition for optimal processing.");
+
+  public static final ConfigProperty<Integer> RANGE_REPARTITION_RANDOM_SEED = ConfigProperty
+      .key(METADATA_PREFIX + ".range.repartition.random.seed")
+      .defaultValue(42)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Random seed used for sampling during range-based repartitioning. "
+          + "This ensures reproducible results across runs.");
+
+  public static final ConfigProperty<Integer> REPARTITION_MIN_PARTITIONS_THRESHOLD = ConfigProperty
+      .key(METADATA_PREFIX + ".repartition.min.partitions.threshold")
+      .defaultValue(100)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Minimum number of partitions threshold below which repartitioning is triggered. "
+          + "When the number of partitions is below this threshold, data will be repartitioned for better parallelism.");
+
+  public static final ConfigProperty<Integer> REPARTITION_DEFAULT_PARTITIONS = ConfigProperty
+      .key(METADATA_PREFIX + ".repartition.default.partitions")
+      .defaultValue(200)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Default number of partitions to use when repartitioning is needed. "
+          + "This provides a reasonable level of parallelism for metadata table operations.");
+
+  public static final ConfigProperty<Integer> METADATA_FILE_CACHE_MAX_SIZE_MB = ConfigProperty
+      .key(METADATA_PREFIX + ".file.cache.max.size.mb")
+      .defaultValue(50)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Max size in MB below which metadata file (HFile) will be downloaded "
+          + "and cached entirely for the HFileReader.");
+
+  public static final ConfigProperty<Boolean> BLOOM_FILTER_ENABLE = ConfigProperty
+      .key(METADATA_PREFIX + ".bloom.filter.enable")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Whether to use bloom filter in the files for lookup in the metadata table.");
+
+  // Configs that control the bloom filter that is written to the file footer
+  public static final ConfigProperty<String> BLOOM_FILTER_TYPE = ConfigProperty
+      .key(METADATA_PREFIX + ".bloom.filter.type")
+      .defaultValue(BloomFilterTypeCode.DYNAMIC_V0.name())
+      .withValidValues(BloomFilterTypeCode.SIMPLE.name(), BloomFilterTypeCode.DYNAMIC_V0.name())
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation(BloomFilterTypeCode.class, "Bloom filter type for the files in the metadata table");
+
+  public static final ConfigProperty<String> BLOOM_FILTER_NUM_ENTRIES = ConfigProperty
+      .key(METADATA_PREFIX + ".bloom.filter.num.entries")
+      .defaultValue("10000")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("This is the number of entries stored in a bloom filter for the files in the metadata table. "
+          + "The rationale for the default: 10000 is chosen to be a good tradeoff between false positive rate and "
+          + "storage size. Warning: Setting this very low generates a lot of false positives and the metadata "
+          + "table reading has to scan a lot more files than it has to and setting this to a very high number "
+          + "increases the size every base file linearly (roughly 4KB for every 50000 entries). "
+          + "This config is also used with DYNAMIC bloom filter which determines the initial size for the bloom.");
+
+  public static final ConfigProperty<String> BLOOM_FILTER_FPP = ConfigProperty
+      .key(METADATA_PREFIX + ".bloom.filter.fpp")
+      .defaultValue("0.000000001")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Expected probability a false positive in a bloom filter for the files in the "
+          + "metadata table. This is used to calculate how many bits should be assigned for the bloom filter "
+          + "and the number of hash functions. This is usually set very low (default: 0.000000001), "
+          + "we like to tradeoff disk space for lower false positives. If the number of entries "
+          + "added to bloom filter exceeds the configured value (hoodie.metadata.bloom.num_entries), "
+          + "then this fpp may not be honored.");
+
+  public static final ConfigProperty<String> BLOOM_FILTER_DYNAMIC_MAX_ENTRIES = ConfigProperty
+      .key(METADATA_PREFIX + ".bloom.filter.dynamic.max.entries")
+      .defaultValue("100000")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("The threshold for the maximum number of keys to record in a dynamic "
+          + "bloom filter row for the files in the metadata table. Only applies if the filter "
+          + "type (" + BLOOM_FILTER_TYPE.key() + " ) is BloomFilterTypeCode.DYNAMIC_V0.");
+
+  public static final ConfigProperty<Integer> RECORD_PREPARATION_PARALLELISM = ConfigProperty
+      .key(METADATA_PREFIX + ".record.preparation.parallelism")
+      .defaultValue(0)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("when set to positive number, metadata table record preparation stages "
+          + "honor the set value for number of tasks. If not, number of write status's from data "
+          + "table writes will be used for metadata table record preparation");
+
+  public static final ConfigProperty<Boolean> FAIL_ON_TABLE_SERVICE_FAILURES = ConfigProperty
+      .key(METADATA_PREFIX + ".write.fail.on.table.service.failures")
+      .defaultValue(true)
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("when set to true, it fails the job on metadata table's "
+          + "table services operation failure");
+
+  public static final ConfigProperty<Boolean> RECORD_INDEX_INITIALIZATION_VALIDATION_ENABLE = ConfigProperty
+      .key(METADATA_PREFIX + ".record.index.enable.validation.on.initialization")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Enable validation of record index after initialization by comparing the expected record count "
+          + "with the actual record count stored in the metadata table. This validation runs in a distributed manner "
+          + "using the compute engine. Disabled by default as it adds overhead to the initialization process.");
+
   public long getMaxLogFileSize() {
     return getLong(MAX_LOG_FILE_SIZE_BYTES_PROP);
   }
@@ -479,6 +659,10 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getBoolean(STREAMING_WRITE_ENABLED);
   }
 
+  public int getStreamingWritesCoalesceDivisorForDataTableWrites() {
+    return getInt(HoodieMetadataConfig.STREAMING_WRITE_DATATABLE_WRITE_STATUSES_COALESCE_DIVISOR);
+  }
+
   public boolean isBloomFilterIndexEnabled() {
     return getBooleanOrDefault(ENABLE_METADATA_INDEX_BLOOM_FILTER);
   }
@@ -487,8 +671,12 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getBooleanOrDefault(ENABLE_METADATA_INDEX_COLUMN_STATS);
   }
 
-  public boolean isRecordIndexEnabled() {
-    return isEnabled() && getBooleanOrDefault(RECORD_INDEX_ENABLE_PROP);
+  public boolean isGlobalRecordLevelIndexEnabled() {
+    return isEnabled() && getBooleanOrDefault(GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP);
+  }
+
+  public boolean isRecordLevelIndexEnabled() {
+    return isEnabled() && getBooleanOrDefault(RECORD_LEVEL_INDEX_ENABLE_PROP);
   }
 
   public List<String> getColumnsEnabledForColumnStatsIndex() {
@@ -551,20 +739,28 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getIntOrDefault(METADATA_MAX_NUM_DELTACOMMITS_WHEN_PENDING);
   }
 
-  public int getRecordIndexMinFileGroupCount() {
-    return getInt(RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP);
+  public int getGlobalRecordLevelIndexMinFileGroupCount() {
+    return getInt(GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP);
   }
 
-  public int getRecordIndexMaxFileGroupCount() {
-    return getInt(RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP);
+  public int getRecordLevelIndexMinFileGroupCount() {
+    return getInt(RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP);
+  }
+
+  public int getGlobalRecordLevelIndexMaxFileGroupCount() {
+    return getInt(GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP);
+  }
+
+  public int getRecordLevelIndexMaxFileGroupCount() {
+    return getInt(RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP);
   }
 
   public float getRecordIndexGrowthFactor() {
     return getFloat(RECORD_INDEX_GROWTH_FACTOR_PROP);
   }
 
-  public int getRecordIndexMaxFileGroupSizeBytes() {
-    return getInt(RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP);
+  public long getRecordIndexMaxFileGroupSizeBytes() {
+    return getLong(RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP);
   }
 
   public String getSplliableMapDir() {
@@ -581,6 +777,10 @@ public final class HoodieMetadataConfig extends HoodieConfig {
 
   public int getRecordIndexMaxParallelism() {
     return getInt(RECORD_INDEX_MAX_PARALLELISM);
+  }
+
+  public boolean isRecordIndexInitializationValidationEnabled() {
+    return getBooleanOrDefault(RECORD_INDEX_INITIALIZATION_VALIDATION_ENABLE);
   }
 
   public boolean shouldAutoInitialize() {
@@ -615,6 +815,26 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getExpressionIndexOptions(getString(EXPRESSION_INDEX_OPTIONS));
   }
 
+  public boolean enableBloomFilter() {
+    return getBooleanOrDefault(BLOOM_FILTER_ENABLE);
+  }
+
+  public String getBloomFilterType() {
+    return getStringOrDefault(BLOOM_FILTER_TYPE);
+  }
+
+  public int getBloomFilterNumEntries() {
+    return getIntOrDefault(BLOOM_FILTER_NUM_ENTRIES);
+  }
+
+  public double getBloomFilterFpp() {
+    return getDoubleOrDefault(BLOOM_FILTER_FPP);
+  }
+
+  public int getDynamicBloomFilterMaxNumEntries() {
+    return getIntOrDefault(BLOOM_FILTER_DYNAMIC_MAX_ENTRIES);
+  }
+
   private Map<String, String> getExpressionIndexOptions(String configValue) {
     Map<String, String> optionsMap = new HashMap<>();
     if (StringUtils.isNullOrEmpty(configValue)) {
@@ -636,7 +856,7 @@ public final class HoodieMetadataConfig extends HoodieConfig {
   }
 
   public boolean isPartitionStatsIndexEnabled() {
-    return getBooleanOrDefault(ENABLE_METADATA_INDEX_PARTITION_STATS);
+    return getBooleanOrDefault(ENABLE_METADATA_INDEX_COLUMN_STATS);
   }
 
   public int getPartitionStatsIndexFileGroupCount() {
@@ -648,8 +868,9 @@ public final class HoodieMetadataConfig extends HoodieConfig {
   }
 
   public boolean isSecondaryIndexEnabled() {
-    // Secondary index is enabled only iff record index (primary key index) is also enabled
-    return isRecordIndexEnabled() && getBoolean(SECONDARY_INDEX_ENABLE_PROP) && !isDropMetadataIndex(MetadataPartitionType.SECONDARY_INDEX.getPartitionPath());
+    // Secondary index is enabled only iff record index (primary key index) is also enabled and a secondary index column is specified.
+    return isGlobalRecordLevelIndexEnabled() && getBoolean(SECONDARY_INDEX_ENABLE_PROP) && StringUtils.nonEmpty(getSecondaryIndexColumn())
+        && !isDropMetadataIndex(MetadataPartitionType.SECONDARY_INDEX.getPartitionPath());
   }
 
   public int getSecondaryIndexParallelism() {
@@ -666,6 +887,42 @@ public final class HoodieMetadataConfig extends HoodieConfig {
 
   public String getMetadataIndexToDrop() {
     return getString(DROP_METADATA_INDEX);
+  }
+
+  public double getRangeRepartitionSamplingFraction() {
+    return getDouble(RANGE_REPARTITION_SAMPLING_FRACTION);
+  }
+
+  public int getRangeRepartitionTargetRecordsPerPartition() {
+    return getInt(RANGE_REPARTITION_TARGET_RECORDS_PER_PARTITION);
+  }
+
+  public int getRangeRepartitionRandomSeed() {
+    return getInt(RANGE_REPARTITION_RANDOM_SEED);
+  }
+
+  public int getRepartitionMinPartitionsThreshold() {
+    return getInt(REPARTITION_MIN_PARTITIONS_THRESHOLD);
+  }
+
+  public int getRepartitionDefaultPartitions() {
+    return getInt(REPARTITION_DEFAULT_PARTITIONS);
+  }
+
+  public int getFileCacheMaxSizeMB() {
+    return getInt(METADATA_FILE_CACHE_MAX_SIZE_MB);
+  }
+
+  public int getRecordPreparationParallelism() {
+    return getIntOrDefault(RECORD_PREPARATION_PARALLELISM);
+  }
+
+  public boolean shouldDeriveFromDataTableCleanPolicy() {
+    return getBooleanOrDefault(DERIVE_FROM_DATA_TABLE_CLEAN_POLICY);
+  }
+
+  public boolean shouldFailOnTableServiceFailures() {
+    return getBooleanOrDefault(FAIL_ON_TABLE_SERVICE_FAILURES);
   }
 
   /**
@@ -797,6 +1054,11 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       return this;
     }
 
+    public HoodieMetadataConfig.Builder deriveFromDataTableCleanPolicy(boolean deriveFromDataTableCleanPolicy) {
+      metadataConfig.setValue(DERIVE_FROM_DATA_TABLE_CLEAN_POLICY, Boolean.toString(deriveFromDataTableCleanPolicy));
+      return this;
+    }
+
     public Builder withFileListingParallelism(int parallelism) {
       metadataConfig.setValue(FILE_LISTING_PARALLELISM_VALUE, String.valueOf(parallelism));
       return this;
@@ -837,14 +1099,19 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       return this;
     }
 
-    public Builder withEnableRecordIndex(boolean enabled) {
-      metadataConfig.setValue(RECORD_INDEX_ENABLE_PROP, String.valueOf(enabled));
+    public Builder withEnableGlobalRecordLevelIndex(boolean enabled) {
+      metadataConfig.setValue(GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP, String.valueOf(enabled));
+      return this;
+    }
+
+    public Builder withEnableRecordLevelIndex(boolean enabled) {
+      metadataConfig.setValue(RECORD_LEVEL_INDEX_ENABLE_PROP, String.valueOf(enabled));
       return this;
     }
 
     public Builder withRecordIndexFileGroupCount(int minCount, int maxCount) {
-      metadataConfig.setValue(RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP, String.valueOf(minCount));
-      metadataConfig.setValue(RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP, String.valueOf(maxCount));
+      metadataConfig.setValue(GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP, String.valueOf(minCount));
+      metadataConfig.setValue(GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP, String.valueOf(maxCount));
       return this;
     }
 
@@ -910,11 +1177,6 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       return this;
     }
 
-    public Builder withMetadataIndexPartitionStats(boolean enable) {
-      metadataConfig.setValue(ENABLE_METADATA_INDEX_PARTITION_STATS, String.valueOf(enable));
-      return this;
-    }
-
     public Builder withMetadataIndexPartitionStatsFileGroupCount(int fileGroupCount) {
       metadataConfig.setValue(METADATA_INDEX_PARTITION_STATS_FILE_GROUP_COUNT, String.valueOf(fileGroupCount));
       return this;
@@ -955,10 +1217,39 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       return this;
     }
 
+    public Builder withRangeRepartitionSamplingFraction(double samplingFraction) {
+      metadataConfig.setValue(RANGE_REPARTITION_SAMPLING_FRACTION, String.valueOf(samplingFraction));
+      return this;
+    }
+
+    public Builder withRangeRepartitionTargetRecordsPerPartition(int targetRecordsPerPartition) {
+      metadataConfig.setValue(RANGE_REPARTITION_TARGET_RECORDS_PER_PARTITION, String.valueOf(targetRecordsPerPartition));
+      return this;
+    }
+
+    public Builder withRangeRepartitionRandomSeed(int randomSeed) {
+      metadataConfig.setValue(RANGE_REPARTITION_RANDOM_SEED, String.valueOf(randomSeed));
+      return this;
+    }
+
+    public Builder withRepartitionMinPartitionsThreshold(int minPartitionsThreshold) {
+      metadataConfig.setValue(REPARTITION_MIN_PARTITIONS_THRESHOLD, String.valueOf(minPartitionsThreshold));
+      return this;
+    }
+
+    public Builder withRepartitionDefaultPartitions(int defaultPartitions) {
+      metadataConfig.setValue(REPARTITION_DEFAULT_PARTITIONS, String.valueOf(defaultPartitions));
+      return this;
+    }
+
+    public Builder setFailOnTableServiceFailures(boolean failOnTableServiceFailures) {
+      metadataConfig.setValue(FAIL_ON_TABLE_SERVICE_FAILURES, String.valueOf(failOnTableServiceFailures));
+      return this;
+    }
+
     public HoodieMetadataConfig build() {
       metadataConfig.setDefaultValue(ENABLE, getDefaultMetadataEnable(engineType));
       metadataConfig.setDefaultValue(ENABLE_METADATA_INDEX_COLUMN_STATS, getDefaultColStatsEnable(engineType));
-      metadataConfig.setDefaultValue(ENABLE_METADATA_INDEX_PARTITION_STATS, metadataConfig.isColumnStatsIndexEnabled());
       metadataConfig.setDefaultValue(SECONDARY_INDEX_ENABLE_PROP, getDefaultSecondaryIndexEnable(engineType));
       metadataConfig.setDefaultValue(STREAMING_WRITE_ENABLED, getDefaultForStreamingWriteEnabled(engineType));
       // fix me: disable when schema on read is enabled.
@@ -1014,6 +1305,13 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       }
     }
   }
+
+  /**
+   * The config is now deprecated. Partition stats are configured using the column stats config itself.
+   */
+  @Deprecated
+  public static final String ENABLE_METADATA_INDEX_PARTITION_STATS =
+      METADATA_PREFIX + ".index.partition.stats.enable";
 
   /**
    * @deprecated Use {@link #ENABLE} and its methods.

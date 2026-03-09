@@ -20,6 +20,7 @@ import org.apache.hudi.DataSourceWriteOptions;
 import org.apache.hudi.HoodieDataSourceHelpers;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.InProcessTimeGenerator;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -30,20 +31,19 @@ import org.apache.hudi.hive.SlashEncodedDayPartitionValueExtractor;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.DataFrameWriter;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.apache.hudi.common.testutils.RawTripTestPayload.recordsToStrings;
+import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.recordsToStrings;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_PASS;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_SYNC_ENABLED;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_URL;
@@ -52,6 +52,7 @@ import static org.apache.hudi.sync.common.HoodieSyncConfig.META_SYNC_DATABASE_NA
 import static org.apache.hudi.sync.common.HoodieSyncConfig.META_SYNC_TABLE_NAME;
 import static org.apache.hudi.testutils.HoodieClientTestUtils.getSparkConfForTest;
 
+@Slf4j
 public class HoodieJavaGenerateApp {
   @Parameter(names = {"--table-path", "-p"}, description = "Path for Hoodie sample table")
   private String tablePath = "file:///tmp/hoodie/sample-table";
@@ -92,8 +93,6 @@ public class HoodieJavaGenerateApp {
   @Parameter(names = {"--help", "-h"}, help = true)
   public Boolean help = false;
 
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieJavaGenerateApp.class);
-
   public static void main(String[] args) throws Exception {
     HoodieJavaGenerateApp cli = new HoodieJavaGenerateApp();
     JCommander cmd = new JCommander(cli, null, args);
@@ -131,7 +130,7 @@ public class HoodieJavaGenerateApp {
    */
   private DataFrameWriter<Row> updateHiveSyncConfig(DataFrameWriter<Row> writer) {
     if (enableHiveSync) {
-      LOG.info("Enabling Hive sync to " + hiveJdbcUrl);
+      log.info("Enabling Hive sync to {}", hiveJdbcUrl);
       writer = writer.option(META_SYNC_TABLE_NAME.key(), hiveTable)
           .option(META_SYNC_DATABASE_NAME.key(), hiveDB)
           .option(HIVE_URL.key(), hiveJdbcUrl)
@@ -183,7 +182,7 @@ public class HoodieJavaGenerateApp {
         // this is the partition to place it into
         .option(DataSourceWriteOptions.PARTITIONPATH_FIELD().key(), "partition")
         // use to combine duplicate records in input/with disk val
-        .option(DataSourceWriteOptions.PRECOMBINE_FIELD().key(), "timestamp")
+        .option(HoodieTableConfig.ORDERING_FIELDS.key(), "timestamp")
         // Used by hive sync and queries
         .option(HoodieWriteConfig.TBL_NAME.key(), tableName)
         .mode(commitType);
@@ -193,6 +192,6 @@ public class HoodieJavaGenerateApp {
     writer.save(tablePath); // ultimately where the dataset will be placed
     FileSystem fs = FileSystem.get(jssc.hadoopConfiguration());
     String commitInstantTime1 = HoodieDataSourceHelpers.latestCommit(fs, tablePath);
-    LOG.info("Commit at instant time :" + commitInstantTime1);
+    log.info("Commit at instant time: {}", commitInstantTime1);
   }
 }

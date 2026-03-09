@@ -20,6 +20,8 @@ package org.apache.hudi.integ.testsuite.dag.nodes
 
 import org.apache.hudi.{AvroConversionUtils, DataSourceWriteOptions, HoodieSparkUtils}
 import org.apache.hudi.client.WriteStatus
+import org.apache.hudi.common.schema.HoodieSchema
+import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.util.collection.Pair
 import org.apache.hudi.config.{HoodieIndexConfig, HoodieWriteConfig}
 import org.apache.hudi.integ.testsuite.configuration.DeltaConfig.Config
@@ -60,7 +62,7 @@ class SparkInsertNode(dagNodeConfig: Config) extends DagNode[RDD[WriteStatus]] {
     val pathToRead = context.getWriterContext.getCfg.inputBasePath + "/" + batchIdRecords.getKey()
     val avroDf = context.getWriterContext.getSparkSession.read.format("avro").load(pathToRead)
     val genRecsRDD = HoodieSparkUtils.createRdd(avroDf, "testStructName", "testNamespace", false,
-      org.apache.hudi.common.util.Option.of(new Schema.Parser().parse(context.getWriterContext.getHoodieTestSuiteWriter.getSchema)))
+      org.apache.hudi.common.util.Option.of(HoodieSchema.parse(context.getWriterContext.getHoodieTestSuiteWriter.getSchema)))
 
     val inputDF = AvroConversionUtils.createDataFrame(genRecsRDD,
       context.getWriterContext.getHoodieTestSuiteWriter.getSchema,
@@ -68,7 +70,7 @@ class SparkInsertNode(dagNodeConfig: Config) extends DagNode[RDD[WriteStatus]] {
 
     inputDF.write.format("hudi")
       .options(DataSourceWriteOptions.mayBeDerivePartitionPath(context.getWriterContext.getProps.asScala.toMap))
-      .option(DataSourceWriteOptions.PRECOMBINE_FIELD.key(), "test_suite_source_ordering_field")
+      .option(HoodieTableConfig.ORDERING_FIELDS.key(), "test_suite_source_ordering_field")
       .option(DataSourceWriteOptions.TABLE_NAME.key, context.getHoodieTestSuiteWriter.getCfg.targetTableName)
       .option(DataSourceWriteOptions.TABLE_TYPE.key, context.getHoodieTestSuiteWriter.getCfg.tableType)
       .option(HoodieIndexConfig.INDEX_TYPE.key, context.getHoodieTestSuiteWriter.getCfg.indexType)

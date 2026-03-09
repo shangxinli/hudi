@@ -32,16 +32,18 @@ import org.apache.hudi.util.ClusteringUtil;
 import org.apache.hudi.util.FlinkTables;
 import org.apache.hudi.util.FlinkWriteClients;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
+import org.apache.flink.streaming.runtime.tasks.StreamTask;
 import org.apache.flink.table.data.RowData;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.List;
@@ -53,9 +55,9 @@ import java.util.stream.Collectors;
  *
  * <p>It should be singleton to avoid conflicts.
  */
+@Slf4j
 public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPlanEvent>
     implements OneInputStreamOperator<RowData, ClusteringPlanEvent> {
-  private static final Logger LOG = LoggerFactory.getLogger(ClusteringPlanOperator.class);
 
   /**
    * Config options.
@@ -85,6 +87,24 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
     ClusteringUtil.rollbackClustering(table, FlinkWriteClients.createWriteClient(conf, getRuntimeContext()));
   }
 
+  /**
+   * The modifier of this method is updated to `protected` sink Flink 2.0, here we overwrite the method
+   * with `public` modifier to make it compatible considering usage in hudi-flink module.
+   */
+  @Override
+  public void setup(StreamTask<?, ?> containingTask, StreamConfig config, Output<StreamRecord<ClusteringPlanEvent>> output) {
+    super.setup(containingTask, config, output);
+  }
+
+  /**
+   * The modifier of this method is updated to `protected` sink Flink 2.0, here we overwrite the method
+   * with `public` modifier to make it compatible considering usage in hudi-flink module.
+   */
+  @Override
+  public void setProcessingTimeService(ProcessingTimeService processingTimeService) {
+    super.setProcessingTimeService(processingTimeService);
+  }
+
   @Override
   public void processElement(StreamRecord<RowData> streamRecord) {
     // no operation
@@ -97,7 +117,7 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
       scheduleClustering(table, checkpointId);
     } catch (Throwable throwable) {
       // make it fail-safe
-      LOG.error("Error while scheduling clustering plan for checkpoint: " + checkpointId, throwable);
+      log.error("Error while scheduling clustering plan for checkpoint: " + checkpointId, throwable);
     }
   }
 
@@ -115,7 +135,7 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
 
     if (!firstRequested.isPresent()) {
       // do nothing.
-      LOG.info("No clustering plan for checkpoint " + checkpointId);
+      log.info("No clustering plan for checkpoint " + checkpointId);
       return;
     }
 
@@ -129,7 +149,7 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
 
     if (!clusteringPlanOption.isPresent()) {
       // do nothing.
-      LOG.info("No clustering plan scheduled");
+      log.info("No clustering plan scheduled");
       return;
     }
 
@@ -138,7 +158,7 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
     if (clusteringPlan == null || (clusteringPlan.getInputGroups() == null)
         || (clusteringPlan.getInputGroups().isEmpty())) {
       // do nothing.
-      LOG.info("Empty clustering plan for instant " + clusteringInstantTime);
+      log.info("Empty clustering plan for instant " + clusteringInstantTime);
     } else {
       // Mark instant as clustering inflight
       ClusteringUtils.transitionClusteringOrReplaceRequestedToInflight(clusteringInstant, Option.empty(), table.getActiveTimeline());
@@ -157,7 +177,7 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
           groupIndexMap.put(groupFileIds, groupIndex);
           index++;
         }
-        LOG.info("Execute clustering plan for instant {} as {} file slices", clusteringInstantTime, clusteringGroup.getSlices().size());
+        log.info("Execute clustering plan for instant {} as {} file slices", clusteringInstantTime, clusteringGroup.getSlices().size());
         output.collect(new StreamRecord<>(
             new ClusteringPlanEvent(clusteringInstantTime, groupInfo, clusteringPlan.getStrategy().getStrategyParams(), groupIndex)
         ));

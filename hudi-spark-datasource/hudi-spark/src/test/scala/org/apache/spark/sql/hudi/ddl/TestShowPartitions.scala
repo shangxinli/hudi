@@ -38,7 +38,7 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
          |) using hudi
          |tblproperties (
          |  primaryKey = 'id',
-         |  preCombineField = 'ts'
+         |  orderingFields = 'ts'
          )
        """.stripMargin)
     // Insert data
@@ -65,7 +65,7 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
          | partitioned by (dt)
          | tblproperties (
          |   primaryKey = 'id',
-         |   preCombineField = 'ts'
+         |   orderingFields = 'ts'
          | )
        """.stripMargin)
     // Empty partitions
@@ -116,7 +116,7 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
          | partitioned by (year, month, day)
          | tblproperties (
          |   primaryKey = 'id',
-         |   preCombineField = 'ts'
+         |   orderingFields = 'ts'
          | )
        """.stripMargin)
     // Empty partitions
@@ -185,7 +185,7 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
                | partitioned by (year, month, day)
                | tblproperties (
                |   primaryKey = 'id',
-               |   preCombineField = 'ts'
+               |   orderingFields = 'ts'
                | )
              """.stripMargin)
           spark.sql(s"alter table $tableName add partition(year='2023', month='06', day='06')")
@@ -221,7 +221,7 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
            | partitioned by (year, month, day)
            | tblproperties (
            |   primaryKey = 'id',
-           |   preCombineField = 'ts'
+           |   orderingFields = 'ts'
            | )
          """.stripMargin)
 
@@ -270,7 +270,7 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
              | partitioned by (dt)
              | tblproperties (
              |   primaryKey = 'id',
-             |   preCombineField = 'ts'
+             |   orderingFields = 'ts'
              | )
          """.stripMargin)
 
@@ -303,6 +303,53 @@ class TestShowPartitions extends HoodieSparkSqlTestBase {
           Seq("dt=2023-12-03")
         )
       }
+    }
+  }
+
+  test("Test show partitions with slash separated list partitions") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      val tablePath = s"${tmp.getCanonicalPath}/$tableName"
+
+      // Create a table with slash separated date partitioning enabled
+      spark.sql(
+        s"""
+           | create table $tableName (
+           |   id int,
+           |   name string,
+           |   price double,
+           |   ts long,
+           |   dt string
+           | ) using hudi
+           | partitioned by (dt)
+           | tblproperties (
+           |   primaryKey = 'id',
+           |   orderingFields = 'ts',
+           |   'hoodie.datasource.write.slash.separated.date.partitioning' = 'true'
+           | )
+           | location '$tablePath'
+       """.stripMargin)
+
+      // Empty partitions
+      checkAnswer(s"show partitions $tableName")(Seq.empty: _*)
+
+      // Insert into dynamic partition with date values
+      spark.sql(
+        s"""
+           | insert into $tableName
+           | values
+           |   (1, 'a1', 10, 1000, '2026-01-05'),
+           |   (2, 'a2', 10, 1000, '2026-01-06'),
+           |   (3, 'a3', 10, 1000, '2026-02-10')
+        """.stripMargin)
+
+      // Check partitions are listed correctly
+      // With slash-separated partitioning enabled, SHOW PARTITIONS returns physical paths
+      checkAnswer(s"show partitions $tableName")(
+        Seq("dt=2026-01-05"),
+        Seq("dt=2026-01-06"),
+        Seq("dt=2026-02-10")
+      )
     }
   }
 }

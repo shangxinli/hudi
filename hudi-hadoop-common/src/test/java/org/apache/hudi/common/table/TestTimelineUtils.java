@@ -25,6 +25,7 @@ import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.common.HoodieRollbackStat;
 import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieCleaningPolicy;
+import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieReplaceCommitMetadata;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.WriteOperationType;
@@ -40,6 +41,7 @@ import org.apache.hudi.common.table.timeline.versioning.v2.InstantComparatorV2;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.storage.StoragePath;
 
 import org.junit.jupiter.api.AfterEach;
@@ -72,8 +74,10 @@ import static org.apache.hudi.common.table.timeline.HoodieTimeline.REPLACE_COMMI
 import static org.apache.hudi.common.table.timeline.HoodieTimeline.ROLLBACK_ACTION;
 import static org.apache.hudi.common.table.timeline.HoodieTimeline.SAVEPOINT_ACTION;
 import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -87,21 +91,21 @@ import static org.mockito.Mockito.when;
 /**
  * Tests {@link TimelineUtils}.
  */
-public class TestTimelineUtils extends HoodieCommonTestHarness {
+class TestTimelineUtils extends HoodieCommonTestHarness {
 
   @BeforeEach
-  public void setUp() throws Exception {
+  void setUp() throws Exception {
     initMetaClient();
   }
 
   @AfterEach
-  public void tearDown() throws Exception {
+  void tearDown() throws Exception {
     cleanMetaClient();
   }
 
   @ParameterizedTest
   @ValueSource(booleans = {true, false})
-  public void testGetPartitionsWithReplaceOrClusterCommits(boolean withReplace) throws IOException {
+  void testGetPartitionsWithReplaceOrClusterCommits(boolean withReplace) throws IOException {
     HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
     HoodieTimeline activeCommitTimeline = activeTimeline.getCommitAndReplaceTimeline();
     assertTrue(activeCommitTimeline.empty());
@@ -154,7 +158,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testGetPartitions() throws IOException {
+  void testGetPartitions() throws IOException {
     HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
     HoodieTimeline activeCommitTimeline = activeTimeline.getCommitAndReplaceTimeline();
     assertTrue(activeCommitTimeline.empty());
@@ -193,7 +197,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testGetPartitionsUnPartitioned() throws IOException {
+  void testGetPartitionsUnPartitioned() throws IOException {
     HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
     HoodieTimeline activeCommitTimeline = activeTimeline.getCommitAndReplaceTimeline();
     assertTrue(activeCommitTimeline.empty());
@@ -221,7 +225,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testRestoreInstants() throws Exception {
+  void testRestoreInstants() throws Exception {
     HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
     HoodieTimeline activeCommitTimeline = activeTimeline.getCommitAndReplaceTimeline();
     assertTrue(activeCommitTimeline.empty());
@@ -244,7 +248,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testGetExtraMetadata() throws Exception {
+  void testGetExtraMetadata() throws Exception {
     String extraMetadataKey = "test_key";
     String extraMetadataValue1 = "test_value1";
     HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
@@ -295,7 +299,43 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testGetCommitsTimelineAfter() throws IOException {
+  void testGetExtraMetadataFromLatestAfterZeroByteOlderCommitFile() throws Exception {
+    String extraMetadataKey = "test_key";
+    String extraMetadataValue = "latest_value";
+    HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
+
+    // Commit 0 (to be corrupted later).
+    String ts0 = "0";
+    HoodieInstant instant0 = new HoodieInstant(REQUESTED, COMMIT_ACTION, ts0, InstantComparatorV2.REQUESTED_TIME_BASED_COMPARATOR);
+    activeTimeline.createNewInstant(instant0);
+    instant0 = new HoodieInstant(INFLIGHT, COMMIT_ACTION, ts0, InstantComparatorV2.REQUESTED_TIME_BASED_COMPARATOR);
+    activeTimeline.createNewInstant(instant0);
+    Map<String, String> extraMetadata = new HashMap<>();
+    extraMetadata.put(extraMetadataKey, extraMetadataValue);
+    HoodieInstant completedCommit = activeTimeline.saveAsComplete(instant0, getCommitMetadata(basePath, ts0, ts0, 2, extraMetadata));
+
+    // Replace commit 0 file with a zero-byte file.
+    metaClient.reloadActiveTimeline();
+    StoragePath commit0FilePath =
+        new StoragePath(metaClient.getTimelinePath(), metaClient.getInstantFileNameGenerator().getFileName(completedCommit));
+    assertTrue(metaClient.getStorage().deleteFile(commit0FilePath), "Failed to delete original commit file");
+    assertTrue(metaClient.getStorage().createNewFile(commit0FilePath), "Failed to create zero-byte commit file");
+
+    // Validate reading metadata from the zero-byte commit file does not fail.
+    HoodieInstant lastCommit = metaClient.reloadActiveTimeline().lastInstant().get();
+    HoodieCommitMetadata zeroByteCommitMetadata = assertDoesNotThrow(
+        () -> metaClient.reloadActiveTimeline().readCommitMetadata(lastCommit),
+        "Reading zero-byte commit file should not fail");
+    assertEquals(WriteOperationType.UNKNOWN, zeroByteCommitMetadata.getOperationType(),
+        "Zero-byte commit file should deserialize to empty commit metadata with UNKNOWN operation type");
+
+    // Check should fail.
+    assertThrows(HoodieIOException.class, () -> TimelineUtils
+        .getExtraMetadataFromLatest(metaClient, extraMetadataKey), "Completed commits should always be readable");
+  }
+
+  @Test
+  void testGetCommitsTimelineAfter() throws IOException {
     // Should only load active timeline
     String startTs = "010";
     HoodieTableMetaClient mockMetaClient = prepareMetaClient(
@@ -405,7 +445,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
     return mockMetaClient;
   }
 
-  public void verifyTimeline(List<HoodieInstant> expectedInstants, HoodieTimeline timeline) {
+  void verifyTimeline(List<HoodieInstant> expectedInstants, HoodieTimeline timeline) {
     assertEquals(
         expectedInstants.stream().sorted().collect(Collectors.toList()),
         timeline.getInstants().stream().sorted().collect(Collectors.toList())
@@ -413,7 +453,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testGetEarliestInstantForMetadataArchival() throws IOException {
+  void testGetEarliestInstantForMetadataArchival() throws IOException {
     // Empty timeline
     assertEquals(
         Option.empty(),
@@ -530,8 +570,8 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   private HoodieReplaceCommitMetadata getReplaceCommitMetadata(String basePath, String commitTs, String replacePartition, int replaceCount,
-                                                                       String newFilePartition, int newFileCount, Map<String, String> extraMetadata,
-                                                                       WriteOperationType operationType) {
+                                                               String newFilePartition, int newFileCount, Map<String, String> extraMetadata,
+                                                               WriteOperationType operationType) {
     HoodieReplaceCommitMetadata commit = new HoodieReplaceCommitMetadata();
     commit.setOperationType(operationType);
     for (int i = 1; i <= newFileCount; i++) {
@@ -555,7 +595,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
     return commit;
   }
 
-  private Option<HoodieCleanMetadata> getCleanMetadata(String partition, String time, boolean isPartitionDeleted) throws IOException {
+  private Option<HoodieCleanMetadata> getCleanMetadata(String partition, String time, boolean isPartitionDeleted) {
     Map<String, HoodieCleanPartitionMetadata> partitionToFilesCleaned = new HashMap<>();
     List<String> filesDeleted = new ArrayList<>();
     filesDeleted.add("file-" + partition + "-" + time + "1");
@@ -580,7 +620,7 @@ public class TestTimelineUtils extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testGetDroppedPartitions() throws Exception {
+  void testGetDroppedPartitions() throws Exception {
     HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
     HoodieTimeline activeCommitTimeline = activeTimeline.getCommitAndReplaceTimeline();
     assertTrue(activeCommitTimeline.empty());

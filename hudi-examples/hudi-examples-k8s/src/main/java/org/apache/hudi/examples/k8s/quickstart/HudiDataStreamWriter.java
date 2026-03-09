@@ -22,11 +22,12 @@ import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.types.RowKind;
+
+import org.apache.hudi.adapter.SourceFunctionAdapter;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.examples.k8s.quickstart.utils.DataGenerator;
@@ -52,7 +53,7 @@ import java.util.concurrent.TimeUnit;
 public class HudiDataStreamWriter {
 
   public static DataType ROW_DATA_TYPE = DataTypes.ROW(
-      DataTypes.FIELD("ts", DataTypes.TIMESTAMP(3)), // precombine field
+      DataTypes.FIELD("ts", DataTypes.TIMESTAMP(3)), // ordering field
       DataTypes.FIELD("uuid", DataTypes.VARCHAR(40)),// record key
       DataTypes.FIELD("rider", DataTypes.VARCHAR(20)),
       DataTypes.FIELD("driver", DataTypes.VARCHAR(20)),
@@ -106,7 +107,7 @@ public class HudiDataStreamWriter {
     options.put(FlinkOptions.PATH.key(), basePath);
     options.put(HoodieCommonConfig.HOODIE_FS_ATOMIC_CREATION_SUPPORT.key(), "s3a");
     options.put(FlinkOptions.TABLE_TYPE.key(), HoodieTableType.MERGE_ON_READ.name());
-    options.put(FlinkOptions.PRECOMBINE_FIELD.key(), "ts");
+    options.put(FlinkOptions.ORDERING_FIELDS.key(), "ts");
     options.put(FlinkOptions.RECORD_KEY_FIELD.key(), "uuid");
     options.put(FlinkOptions.IGNORE_FAILED.key(), "true");
     return options;
@@ -135,7 +136,7 @@ public class HudiDataStreamWriter {
   /**
    * Sample data source for generating RowData objects.
    */
-  static class SampleDataSource implements SourceFunction<RowData> {
+  static class SampleDataSource implements SourceFunctionAdapter<RowData> {
     private volatile boolean isRunning = true;
 
     @Override

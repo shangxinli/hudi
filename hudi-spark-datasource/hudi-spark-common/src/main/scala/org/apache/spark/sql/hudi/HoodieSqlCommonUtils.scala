@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.hudi
 
-import org.apache.hudi.{AvroConversionUtils, DataSourceReadOptions, SparkAdapterSupport}
+import org.apache.hudi.{DataSourceReadOptions, HoodieSchemaConversionUtils, SparkAdapterSupport}
 import org.apache.hudi.DataSourceWriteOptions.COMMIT_METADATA_KEYPREFIX
 import org.apache.hudi.client.common.HoodieSparkEngineContext
 import org.apache.hudi.common.config.{HoodieMetadataConfig, TypedProperties}
@@ -29,15 +29,17 @@ import org.apache.hudi.common.table.timeline.TimelineUtils.parseDateFromInstantT
 import org.apache.hudi.common.util.PartitionPathEncodeUtils
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.storage.{HoodieStorage, StoragePath, StoragePathInfo}
+import org.apache.hudi.util.SparkConfigUtils
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.spark.api.java.JavaSparkContext
-import org.apache.spark.sql.{AnalysisException, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.Resolver
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, HoodieCatalogTable}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Cast, Expression, Literal}
+import org.apache.spark.sql.hudi.command.exception.HoodieAnalysisException
 import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.types._
 
@@ -59,11 +61,11 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
   def getTableSqlSchema(metaClient: HoodieTableMetaClient,
                         includeMetadataFields: Boolean = false): Option[StructType] = {
     val schemaResolver = new TableSchemaResolver(metaClient)
-    val avroSchema = try Some(schemaResolver.getTableAvroSchema(includeMetadataFields))
+    val schema = try Some(schemaResolver.getTableSchema(includeMetadataFields))
     catch {
       case _: Throwable => None
     }
-    avroSchema.map(AvroConversionUtils.convertAvroSchemaToStructType)
+    schema.map(HoodieSchemaConversionUtils.convertHoodieSchemaToStructType)
   }
 
   def getAllPartitionPaths(spark: SparkSession, table: CatalogTable, metaClient: HoodieTableMetaClient): Seq[String] = {
@@ -87,6 +89,19 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
     FSUtils.getFilesInPartitions(sparkEngine, metaClient, metadataConfig, partitionPaths.toArray).asScala
       .map(e => (e._1, e._2.asScala.toSeq))
       .toMap
+  }
+
+  /**
+   * Determine whether slash separated date partitioning is enabled
+   */
+  def isSlashSeparatedDatePartitioning(partitionPaths: Seq[String], table: CatalogTable): Boolean = {
+    if (table.partitionColumnNames.nonEmpty) {
+      partitionPaths.forall(partitionPath => {
+        table.partitionColumnNames.size == 1 && partitionPath.split("/").length == 3
+      })
+    } else {
+      false
+    }
   }
 
   /**
@@ -282,7 +297,7 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
     }
   }
 
-  // Find the origin column from schema by column name, throw an AnalysisException if the column
+  // Find the origin column from schema by column name, throw an HoodieAnalysisException if the column
   // reference is invalid.
   def findColumnByName(schema: StructType, name: String, resolver: Resolver):Option[StructField] = {
     schema.fields.collectFirst {
@@ -311,13 +326,13 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
                                  resolver: Resolver): Map[String, T] = {
     val normalizedPartSpec = partitionSpec.toSeq.map { case (key, value) =>
       val normalizedKey = partColNames.find(resolver(_, key)).getOrElse {
-        throw new AnalysisException(s"$key is not a valid partition column in table $tblName.")
+        throw new HoodieAnalysisException(s"$key is not a valid partition column in table $tblName.")
       }
       normalizedKey -> value
     }
 
     if (normalizedPartSpec.size < partColNames.size) {
-      throw new AnalysisException(
+      throw new HoodieAnalysisException(
         "All partition columns need to be specified for Hoodie's partition")
     }
 
@@ -326,7 +341,7 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
       val duplicateColumns = lowerPartColNames.groupBy(identity).collect {
         case (x, ys) if ys.length > 1 => s"`$x`"
       }
-      throw new AnalysisException(
+      throw new HoodieAnalysisException(
         s"Found duplicate column(s) in the partition schema: ${duplicateColumns.mkString(", ")}")
     }
 
@@ -377,5 +392,19 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
     if (!valid) {
       throw new HoodieException(s"Got an invalid instant ($queryInstant)")
     }
+  }
+
+  /**
+   * Check if Polaris catalog is enabled in the Spark session.
+   * @param sparkSession The Spark session
+   * @return true if Polaris catalog is configured, false otherwise
+   */
+  def isUsingPolarisCatalog(sparkSession: SparkSession): Boolean = {
+    val sparkSessionConfigs = sparkSession.conf.getAll
+    val polarisCatalogClassName = SparkConfigUtils.getStringWithAltKeys(
+      sparkSessionConfigs, DataSourceReadOptions.POLARIS_CATALOG_CLASS_NAME)
+    sparkSessionConfigs
+      .filter(_._1.startsWith("spark.sql.catalog."))
+      .exists(_._2 == polarisCatalogClassName)
   }
 }

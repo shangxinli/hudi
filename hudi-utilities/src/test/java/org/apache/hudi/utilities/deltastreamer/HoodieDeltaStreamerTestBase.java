@@ -54,6 +54,7 @@ import org.apache.hudi.utilities.sources.HoodieIncrSource;
 import org.apache.hudi.utilities.sources.TestDataSource;
 import org.apache.hudi.utilities.sources.TestParquetDFSSourceEmptyBatch;
 import org.apache.hudi.utilities.streamer.HoodieStreamer;
+import org.apache.hudi.utilities.testutils.KafkaTestUtils;
 import org.apache.hudi.utilities.testutils.UtilitiesTestBase;
 
 import org.apache.avro.Schema;
@@ -62,7 +63,6 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
-import org.apache.spark.streaming.kafka010.KafkaTestUtils;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -140,28 +140,24 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
   protected static String topicName;
   protected static String defaultSchemaProviderClassName = FilebasedSchemaProvider.class.getName();
   protected static int testNum = 1;
-
-  Map<String, String> hudiOpts = new HashMap<>();
-  public KafkaTestUtils testUtils;
+  protected static KafkaTestUtils testUtils;
+  protected Map<String, String> hudiOpts = new HashMap<>();
 
   @BeforeEach
   protected void prepareTestSetup() throws IOException {
     setupTest();
-    testUtils = new KafkaTestUtils();
-    testUtils.setup();
     topicName = "topic" + testNum;
     prepareInitialConfigs(storage, basePath, testUtils.brokerAddress());
+    // reset TestDataSource recordInstantTime which may be set by any other test
+    TestDataSource.recordInstantTime = Option.empty();
   }
 
   @AfterEach
   public void cleanupKafkaTestUtils() {
-    if (testUtils != null) {
-      testUtils.teardown();
-      testUtils = null;
-    }
     if (hudiOpts != null) {
       hudiOpts = null;
     }
+    testUtils.deleteTopics();
   }
 
   @BeforeAll
@@ -171,10 +167,14 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     PARQUET_SOURCE_ROOT = basePath + "parquetFiles";
     ORC_SOURCE_ROOT = basePath + "orcFiles";
     JSON_KAFKA_SOURCE_ROOT = basePath + "jsonKafkaFiles";
+    testUtils = new KafkaTestUtils().setup();
   }
 
   @AfterAll
   public static void tearDown() {
+    if (testUtils != null) {
+      testUtils.teardown();
+    }
     UtilitiesTestBase.cleanUpUtilitiesTestServices();
   }
 
@@ -194,7 +194,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     UtilitiesTestBase.Helpers.copyToDFS("streamer-config/source-flattened.avsc", storage, dfsBasePath + "/source-flattened.avsc");
     UtilitiesTestBase.Helpers.copyToDFS("streamer-config/target.avsc", storage, dfsBasePath + "/target.avsc");
     UtilitiesTestBase.Helpers.copyToDFS("streamer-config/target-flattened.avsc", storage, dfsBasePath + "/target-flattened.avsc");
-
+    UtilitiesTestBase.Helpers.copyToDFS("streamer-config/source-timestamp-millis.avsc", storage, dfsBasePath + "/source-timestamp-millis.avsc");
     UtilitiesTestBase.Helpers.copyToDFS("streamer-config/source_short_trip_uber.avsc", storage, dfsBasePath + "/source_short_trip_uber.avsc");
     UtilitiesTestBase.Helpers.copyToDFS("streamer-config/source_uber.avsc", storage, dfsBasePath + "/source_uber.avsc");
     UtilitiesTestBase.Helpers.copyToDFS(
@@ -356,11 +356,11 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     HoodieTestDataGenerator dataGenerator = new HoodieTestDataGenerator(makeDatesAmbiguous);
     if (useCustomSchema) {
       Helpers.saveParquetToDFS(Helpers.toGenericRecords(
-          dataGenerator.generateInsertsAsPerSchema("000", numRecords, schemaStr),
+          dataGenerator.generateInsertsAsPerSchema("000", numRecords, schemaStr, 0L),
           schema), new Path(path), HoodieTestDataGenerator.AVRO_TRIP_SCHEMA);
     } else {
       Helpers.saveParquetToDFS(Helpers.toGenericRecords(
-          dataGenerator.generateInserts("000", numRecords)), new Path(path));
+          dataGenerator.generateInserts("000", numRecords, 0L)), new Path(path));
     }
     return dataGenerator;
   }
@@ -404,13 +404,20 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
                                          String propsFileName, String parquetSourceRoot, boolean addCommonProps,
                                          String partitionPath, String emptyBatchParam, boolean skipRecordKeyField) throws IOException {
     prepareParquetDFSSource(useSchemaProvider, hasTransformer, sourceSchemaFile, targetSchemaFile, propsFileName, parquetSourceRoot, addCommonProps,
-        partitionPath, emptyBatchParam, null, skipRecordKeyField);
+        partitionPath, emptyBatchParam, null, skipRecordKeyField, false);
+  }
+
+  protected void prepareParquetDFSSource(boolean useSchemaProvider, boolean hasTransformer, String sourceSchemaFile, String targetSchemaFile,
+                                         String propsFileName, String parquetSourceRoot, boolean addCommonProps,
+                                         String partitionPath, String emptyBatchParam, boolean skipRecordKeyField, boolean useRowWriter) throws IOException {
+    prepareParquetDFSSource(useSchemaProvider, hasTransformer, sourceSchemaFile, targetSchemaFile, propsFileName, parquetSourceRoot, addCommonProps,
+        partitionPath, emptyBatchParam, null, skipRecordKeyField, useRowWriter);
   }
 
   protected void prepareParquetDFSSource(boolean useSchemaProvider, boolean hasTransformer, String sourceSchemaFile, String targetSchemaFile,
                                        String propsFileName, String parquetSourceRoot, boolean addCommonProps,
                                        String partitionPath, String emptyBatchParam, TypedProperties extraProps,
-                                         boolean skipRecordKeyField) throws IOException {
+                                         boolean skipRecordKeyField, boolean useRowWriter) throws IOException {
     // Properties used for testing delta-streamer with Parquet source
     TypedProperties parquetProps = TypedProperties.copy(extraProps);
 
@@ -422,6 +429,9 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
 
     parquetProps.setProperty("include", "base.properties");
     parquetProps.setProperty("hoodie.embed.timeline.server", "false");
+    if (useRowWriter) {
+      parquetProps.setProperty("hoodie.streamer.write.row.writer.enable", "true");
+    }
     if (!skipRecordKeyField) {
       parquetProps.setProperty("hoodie.datasource.write.recordkey.field", "_row_key");
     }
@@ -624,10 +634,18 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
           tableType, sourceOrderingField, checkpoint, false);
     }
 
+    public static HoodieDeltaStreamer.Config makeConfig(String basePath, WriteOperationType op, String sourceClassName,
+                                                        List<String> transformerClassNames, String propsFilename, boolean enableHiveSync, boolean useSchemaProviderClass,
+                                                        int sourceLimit, boolean updatePayloadClass, String payloadClassName, String tableType, String sourceOrderingField,
+                                                        String checkpoint, boolean allowCommitOnNoCheckpointChange) {
+      return makeConfig(basePath, op, sourceClassName, transformerClassNames, propsFilename, enableHiveSync, useSchemaProviderClass, sourceLimit, updatePayloadClass, payloadClassName,
+          tableType, sourceOrderingField, checkpoint, allowCommitOnNoCheckpointChange, HoodieTableVersion.current());
+    }
+
     static HoodieDeltaStreamer.Config makeConfig(String basePath, WriteOperationType op, String sourceClassName,
                                                  List<String> transformerClassNames, String propsFilename, boolean enableHiveSync, boolean useSchemaProviderClass,
                                                  int sourceLimit, boolean updatePayloadClass, String payloadClassName, String tableType, String sourceOrderingField,
-                                                 String checkpoint, boolean allowCommitOnNoCheckpointChange) {
+                                                 String checkpoint, boolean allowCommitOnNoCheckpointChange, HoodieTableVersion tableVersion) {
       HoodieDeltaStreamer.Config cfg = new HoodieDeltaStreamer.Config();
       cfg.targetBasePath = basePath;
       cfg.targetTableName = "hoodie_trips";
@@ -636,7 +654,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
       cfg.transformerClassNames = transformerClassNames;
       cfg.operation = op;
       cfg.enableHiveSync = enableHiveSync;
-      cfg.sourceOrderingField = sourceOrderingField;
+      cfg.sourceOrderingFields = sourceOrderingField;
       cfg.propsFilePath = UtilitiesTestBase.basePath + "/" + propsFilename;
       cfg.sourceLimit = sourceLimit;
       cfg.checkpoint = checkpoint;
@@ -648,9 +666,9 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
       }
       cfg.allowCommitOnNoCheckpointChange = allowCommitOnNoCheckpointChange;
       Triple<RecordMergeMode, String, String> mergeCfgs =
-          HoodieTableConfig.inferCorrectMergingBehavior(
-              cfg.recordMergeMode, cfg.payloadClassName, cfg.recordMergeStrategyId, cfg.sourceOrderingField,
-              HoodieTableVersion.current());
+          HoodieTableConfig.inferMergingConfigsForWrites(
+              cfg.recordMergeMode, cfg.payloadClassName, cfg.recordMergeStrategyId, cfg.sourceOrderingFields,
+              tableVersion);
       cfg.recordMergeMode = mergeCfgs.getLeft();
       cfg.payloadClassName = mergeCfgs.getMiddle();
       cfg.recordMergeStrategyId = mergeCfgs.getRight();
@@ -665,7 +683,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
       cfg.tableType = "COPY_ON_WRITE";
       cfg.sourceClassName = HoodieIncrSource.class.getName();
       cfg.operation = op;
-      cfg.sourceOrderingField = "timestamp";
+      cfg.sourceOrderingFields = "timestamp";
       cfg.propsFilePath = UtilitiesTestBase.basePath + "/test-downstream-source.properties";
       cfg.sourceLimit = 1000;
       if (null != schemaProviderClassName) {
@@ -684,7 +702,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtleastNCompactionCommits(int minExpected, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage, tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().getCommitAndReplaceTimeline().filterCompletedInstants();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numCompactionCommits = timeline.countInstants();
       assertTrue(minExpected <= numCompactionCommits, "Got=" + numCompactionCommits + ", exp >=" + minExpected);
     }
@@ -692,7 +710,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtleastNDeltaCommits(int minExpected, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().getDeltaCommitTimeline().filterCompletedInstants();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numDeltaCommits = timeline.countInstants();
       assertTrue(minExpected <= numDeltaCommits, "Got=" + numDeltaCommits + ", exp >=" + minExpected);
     }
@@ -700,7 +718,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtleastNCompactionCommitsAfterCommit(int minExpected, String lastSuccessfulCommit, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().getCommitAndReplaceTimeline().findInstantsAfter(lastSuccessfulCommit).filterCompletedInstants();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numCompactionCommits = timeline.countInstants();
       assertTrue(minExpected <= numCompactionCommits, "Got=" + numCompactionCommits + ", exp >=" + minExpected);
     }
@@ -708,7 +726,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtleastNDeltaCommitsAfterCommit(int minExpected, String lastSuccessfulCommit, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.reloadActiveTimeline().getDeltaCommitTimeline().findInstantsAfter(lastSuccessfulCommit).filterCompletedInstants();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numDeltaCommits = timeline.countInstants();
       assertTrue(minExpected <= numDeltaCommits, "Got=" + numDeltaCommits + ", exp >=" + minExpected);
     }
@@ -720,7 +738,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
       HoodieInstant lastInstant = timeline.lastInstant().get();
       HoodieCommitMetadata commitMetadata = timeline.readCommitMetadata(lastInstant);
       assertEquals(totalCommits, timeline.countInstants());
-      if (meta.getTableConfig().getTableVersion() == HoodieTableVersion.EIGHT) {
+      if (meta.getTableConfig().getTableVersion().greaterThanOrEquals(HoodieTableVersion.EIGHT)) {
         assertEquals(expected, commitMetadata.getMetadata(StreamerCheckpointV2.STREAMER_CHECKPOINT_KEY_V2));
       } else {
         assertEquals(expected, commitMetadata.getMetadata(HoodieStreamer.CHECKPOINT_KEY));
@@ -763,7 +781,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtLeastNCommits(int minExpected, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().filterCompletedInstants();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numDeltaCommits = timeline.countInstants();
       assertTrue(minExpected <= numDeltaCommits, "Got=" + numDeltaCommits + ", exp >=" + minExpected);
     }
@@ -771,7 +789,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtLeastNReplaceCommits(int minExpected, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().getCompletedReplaceTimeline();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numDeltaCommits = timeline.countInstants();
       assertTrue(minExpected <= numDeltaCommits, "Got=" + numDeltaCommits + ", exp >=" + minExpected);
     }
@@ -779,7 +797,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertPendingIndexCommit(String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.reloadActiveTimeline().getAllCommitsTimeline().filterPendingIndexTimeline();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numIndexCommits = timeline.countInstants();
       assertEquals(1, numIndexCommits, "Got=" + numIndexCommits + ", exp=1");
     }
@@ -787,7 +805,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertCompletedIndexCommit(String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.reloadActiveTimeline().getAllCommitsTimeline().filterCompletedIndexTimeline();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numIndexCommits = timeline.countInstants();
       assertEquals(1, numIndexCommits, "Got=" + numIndexCommits + ", exp=1");
     }
@@ -795,7 +813,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertNoReplaceCommits(String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().getCompletedReplaceTimeline();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numDeltaCommits = timeline.countInstants();
       assertEquals(0, numDeltaCommits, "Got=" + numDeltaCommits + ", exp =" + 0);
     }
@@ -803,7 +821,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtLeastNClusterRequests(int minExpected, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().filterPendingClusteringTimeline();
-      LOG.info("Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numDeltaCommits = timeline.countInstants();
       assertTrue(minExpected <= numDeltaCommits, "Got=" + numDeltaCommits + ", exp >=" + minExpected);
     }
@@ -811,7 +829,7 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
     static void assertAtLeastNCommitsAfterRollback(int minExpectedRollback, int minExpectedCommits, String tablePath) {
       HoodieTableMetaClient meta = createMetaClient(storage.getConf(), tablePath);
       HoodieTimeline timeline = meta.getActiveTimeline().getRollbackTimeline().filterCompletedInstants();
-      LOG.info("Rollback Timeline Instants=" + meta.getActiveTimeline().getInstants());
+      LOG.info("Rollback Timeline Instants={}", meta.getActiveTimeline().getInstants());
       int numRollbackCommits = timeline.countInstants();
       assertTrue(minExpectedRollback <= numRollbackCommits, "Got=" + numRollbackCommits + ", exp >=" + minExpectedRollback);
       HoodieInstant firstRollback = timeline.getInstants().get(0);
@@ -821,5 +839,23 @@ public class HoodieDeltaStreamerTestBase extends UtilitiesTestBase {
       int numCommits = commitsTimeline.countInstants();
       assertTrue(minExpectedCommits <= numCommits, "Got=" + numCommits + ", exp >=" + minExpectedCommits);
     }
+  }
+
+  protected void syncOnce(HoodieDeltaStreamer.Config cfg) throws Exception {
+    HoodieStreamer streamer = new HoodieDeltaStreamer(cfg, jsc);
+    streamer.sync();
+    streamer.shutdownGracefully();
+  }
+
+  protected void syncOnce(HoodieStreamer streamer) throws Exception {
+    try {
+      streamer.sync();
+    } finally {
+      streamer.shutdownGracefully();
+    }
+  }
+
+  protected void syncOnce(HoodieStreamer.Config cfg, Option<TypedProperties> properties) throws Exception {
+    syncOnce(new HoodieStreamer(cfg, jsc, properties));
   }
 }

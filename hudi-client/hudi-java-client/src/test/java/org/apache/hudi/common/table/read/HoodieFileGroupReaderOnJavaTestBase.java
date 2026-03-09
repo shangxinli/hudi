@@ -23,17 +23,17 @@ import org.apache.hudi.client.HoodieJavaWriteClient;
 import org.apache.hudi.client.common.HoodieJavaEngineContext;
 import org.apache.hudi.common.config.RecordMergeMode;
 import org.apache.hudi.common.engine.EngineType;
-import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieRecordPayload;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
 import org.apache.hudi.keygen.constant.KeyGeneratorType;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
-import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.testutils.HoodieJavaClientTestHarness;
 
 import java.io.IOException;
@@ -59,7 +59,7 @@ public abstract class HoodieFileGroupReaderOnJavaTestBase<T> extends TestHoodieF
   }
 
   @Override
-  public void commitToTable(List<HoodieRecord> recordList, String operation, boolean firstCommit, Map<String, String> writeConfigs, String schemaStr) {
+  public void commitProcessedRecordsToTable(List<HoodieRecord> recordList, String operation, boolean firstCommit, Map<String, String> writeConfigs, String schemaStr) {
     HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder()
         .withEngineType(EngineType.JAVA)
         .withEmbeddedTimelineServerEnabled(false)
@@ -72,7 +72,7 @@ public abstract class HoodieFileGroupReaderOnJavaTestBase<T> extends TestHoodieF
     HoodieJavaEngineContext context = new HoodieJavaEngineContext(getStorageConf(), taskContextSupplier);
     //init table if not exists
     StoragePath basePath = new StoragePath(getBasePath());
-    try (HoodieStorage storage = new HoodieHadoopStorage(basePath, getStorageConf())) {
+    try (HoodieStorage storage = HoodieStorageUtils.getStorage(basePath, getStorageConf())) {
       boolean basepathExists = storage.exists(basePath);
       if (!basepathExists || firstCommit) {
         if (basepathExists) {
@@ -88,7 +88,8 @@ public abstract class HoodieFileGroupReaderOnJavaTestBase<T> extends TestHoodieF
             .setKeyGeneratorType(KeyGeneratorType.SIMPLE.name())
             .setRecordKeyFields(writeConfigs.get(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key()))
             .setPartitionFields(writeConfigs.get(KeyGeneratorOptions.PARTITIONPATH_FIELD_NAME.key()))
-            .setPreCombineField(writeConfigs.get("hoodie.datasource.write.precombine.field"))
+            .setOrderingFields(ConfigUtils.getOrderingFieldsStrDuringWrite(writeConfigs))
+            .setBaseFileFormat(writeConfigs.get(HoodieTableConfig.BASE_FILE_FORMAT.key()))
             .set(initConfigs);
         if (writeConfigs.containsKey("hoodie.datasource.write.payload.class")) {
           builder = builder.setPayloadClassName(writeConfigs.get("hoodie.datasource.write.payload.class"));
@@ -103,7 +104,7 @@ public abstract class HoodieFileGroupReaderOnJavaTestBase<T> extends TestHoodieF
       String instantTime = writeClient.startCommit();
       // Make a copy of the records for writing. The writer will clear out the data field.
       List<HoodieRecord> recordsCopy = new ArrayList<>(recordList.size());
-      recordList.forEach(hoodieRecord -> recordsCopy.add(new HoodieAvroRecord<>(hoodieRecord.getKey(), (HoodieRecordPayload) hoodieRecord.getData())));
+      recordList.forEach(hoodieRecord -> recordsCopy.add(hoodieRecord.newInstance()));
       if (operation.toLowerCase().equals("insert")) {
         writeClient.commit(instantTime, writeClient.insert(recordsCopy, instantTime), Option.empty(), DELTA_COMMIT_ACTION, Collections.emptyMap());
       } else if (operation.toLowerCase().equals("bulkInsert")) {

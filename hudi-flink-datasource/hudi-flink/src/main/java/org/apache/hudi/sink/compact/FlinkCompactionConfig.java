@@ -22,7 +22,7 @@ import org.apache.hudi.common.config.HoodieMemoryConfig;
 import org.apache.hudi.common.config.HoodieReaderConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieCleaningPolicy;
-import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.io.util.FileIOUtils;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
 import org.apache.hudi.sink.compact.strategy.CompactionPlanStrategy;
@@ -157,6 +157,20 @@ public class FlinkCompactionConfig extends Configuration {
   @Parameter(names = {"--spillable_map_path"}, description = "Default file path prefix for spillable map.")
   public String spillableMapPath = FileIOUtils.getDefaultSpillableMapBasePath();
 
+  @Parameter(names = {"--retry", "-rt"}, description = "Number of retries for compaction operation. "
+      + "Only effective in single-run mode (not service mode). Default is 0 (no retry).")
+  public Integer retry = 0;
+
+  @Parameter(names = {"--retry-last-failed-job", "-rc"},
+      description = "Check and retry last failed compaction job if the inflight instant exceeds max processing time. "
+          + "Only effective in single-run mode.")
+  public Boolean retryLastFailedJob = false;
+
+  @Parameter(names = {"--job-max-processing-time-ms", "-jt"},
+      description = "Max processing time in milliseconds before considering a compaction job as failed. "
+          + "Used with --retry-last-failed-job. Default 0 means no timeout check.")
+  public Long maxProcessingTimeMs = 0L;
+
   @Parameter(names = {"--hoodie-conf"}, description = "Any configuration that can be set in the properties file "
       + "(using the CLI parameter \"--props\") can also be passed through command line using this parameter.")
   public List<String> configs = new ArrayList<>();
@@ -182,25 +196,25 @@ public class FlinkCompactionConfig extends Configuration {
     Map<String, String> propsMap = new HashMap<String, String>((Map) getProps(config));
     org.apache.flink.configuration.Configuration conf = fromMap(propsMap);
 
-    conf.setString(FlinkOptions.PATH, config.path);
-    conf.setString(FlinkOptions.COMPACTION_TRIGGER_STRATEGY, config.compactionTriggerStrategy);
-    conf.setInteger(FlinkOptions.ARCHIVE_MAX_COMMITS, config.archiveMaxCommits);
-    conf.setInteger(FlinkOptions.ARCHIVE_MIN_COMMITS, config.archiveMinCommits);
-    conf.setString(FlinkOptions.CLEAN_POLICY, config.cleanPolicy);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_COMMITS, config.cleanRetainCommits);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_HOURS, config.cleanRetainHours);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_FILE_VERSIONS, config.cleanRetainFileVersions);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, config.compactionDeltaCommits);
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_SECONDS, config.compactionDeltaSeconds);
-    conf.setInteger(FlinkOptions.COMPACTION_MAX_MEMORY, config.compactionMaxMemory);
+    conf.set(FlinkOptions.PATH, config.path);
+    conf.set(FlinkOptions.COMPACTION_TRIGGER_STRATEGY, config.compactionTriggerStrategy);
+    conf.set(FlinkOptions.ARCHIVE_MAX_COMMITS, config.archiveMaxCommits);
+    conf.set(FlinkOptions.ARCHIVE_MIN_COMMITS, config.archiveMinCommits);
+    conf.set(FlinkOptions.CLEAN_POLICY, config.cleanPolicy);
+    conf.set(FlinkOptions.CLEAN_RETAIN_COMMITS, config.cleanRetainCommits);
+    conf.set(FlinkOptions.CLEAN_RETAIN_HOURS, config.cleanRetainHours);
+    conf.set(FlinkOptions.CLEAN_RETAIN_FILE_VERSIONS, config.cleanRetainFileVersions);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, config.compactionDeltaCommits);
+    conf.set(FlinkOptions.COMPACTION_DELTA_SECONDS, config.compactionDeltaSeconds);
+    conf.set(FlinkOptions.COMPACTION_MAX_MEMORY, config.compactionMaxMemory);
     // used as compaction memory by file group reader based compaction
-    conf.setInteger(FlinkOptions.WRITE_MERGE_MAX_MEMORY, config.compactionMaxMemory);
-    conf.setLong(FlinkOptions.COMPACTION_TARGET_IO, config.compactionTargetIo);
-    conf.setInteger(FlinkOptions.COMPACTION_TASKS, config.compactionTasks);
-    conf.setBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED, config.cleanAsyncEnable);
+    conf.set(FlinkOptions.WRITE_MERGE_MAX_MEMORY, config.compactionMaxMemory);
+    conf.set(FlinkOptions.COMPACTION_TARGET_IO, config.compactionTargetIo);
+    conf.set(FlinkOptions.COMPACTION_TASKS, config.compactionTasks);
+    conf.set(FlinkOptions.CLEAN_ASYNC_ENABLED, config.cleanAsyncEnable);
     // use synchronous compaction always
-    conf.setBoolean(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
-    conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, config.schedule);
+    conf.set(FlinkOptions.COMPACTION_OPERATION_EXECUTE_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, config.schedule);
     // Map memory
     conf.setString(HoodieMemoryConfig.SPILLABLE_MAP_BASE_PATH.key(), config.spillableMapPath);
     // set file group reader

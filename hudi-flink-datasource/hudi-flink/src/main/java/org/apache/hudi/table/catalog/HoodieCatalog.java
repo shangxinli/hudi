@@ -18,24 +18,28 @@
 
 package org.apache.hudi.table.catalog;
 
-import org.apache.hudi.avro.AvroSchemaUtils;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
+import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.exception.HoodieMetadataException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.keygen.NonpartitionedAvroKeyGenerator;
-import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.DataTypeUtils;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.StreamerUtil;
+import org.apache.hudi.utils.CatalogUtils;
 
-import org.apache.avro.Schema;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.AbstractCatalog;
 import org.apache.flink.table.catalog.CatalogBaseTable;
@@ -44,11 +48,11 @@ import org.apache.flink.table.catalog.CatalogDatabaseImpl;
 import org.apache.flink.table.catalog.CatalogFunction;
 import org.apache.flink.table.catalog.CatalogPartition;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
-import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.catalog.UniqueConstraint;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.catalog.exceptions.DatabaseAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotEmptyException;
@@ -70,8 +74,6 @@ import org.apache.flink.util.CollectionUtil;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -91,8 +93,8 @@ import static org.apache.hudi.table.catalog.CatalogOptions.DEFAULT_DATABASE;
 /**
  * Catalog that can set up common options for underneath table.
  */
+@Slf4j
 public class HoodieCatalog extends AbstractCatalog {
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieCatalog.class);
 
   private final org.apache.hadoop.conf.Configuration hadoopConf;
   private final String catalogPathStr;
@@ -123,7 +125,7 @@ public class HoodieCatalog extends AbstractCatalog {
     }
 
     if (!databaseExists(getDefaultDatabase())) {
-      LOG.info("Creating database {} automatically because it does not exist.", getDefaultDatabase());
+      log.info("Creating database {} automatically because it does not exist.", getDefaultDatabase());
       Path dbPath = new Path(catalogPath, getDefaultDatabase());
       try {
         fs.mkdirs(dbPath);
@@ -258,12 +260,12 @@ public class HoodieCatalog extends AbstractCatalog {
 
     final String path = inferTablePath(catalogPathStr, tablePath);
     Map<String, String> options = TableOptionProperties.loadFromProperties(path, hadoopConf);
-    final Schema latestSchema = getLatestTableSchema(path);
+    final HoodieSchema latestSchema = getLatestTableSchema(path);
     if (latestSchema != null) {
       List<String> pkColumns = TableOptionProperties.getPkColumns(options);
       // if the table is initialized from spark, the write schema is nullable for pk columns.
       DataType tableDataType = DataTypeUtils.ensureColumnsAsNonNullable(
-          AvroSchemaConverter.convertToDataType(latestSchema), pkColumns);
+          HoodieSchemaConverter.convertToDataType(latestSchema), pkColumns);
       org.apache.flink.table.api.Schema.Builder builder = org.apache.flink.table.api.Schema.newBuilder()
           .fromRowDataType(tableDataType);
       final String pkConstraintName = TableOptionProperties.getPkConstraintName(options);
@@ -272,12 +274,16 @@ public class HoodieCatalog extends AbstractCatalog {
       } else if (!CollectionUtils.isNullOrEmpty(pkColumns)) {
         builder.primaryKey(pkColumns);
       }
+      List<String> metaCols = TableOptionProperties.getMetadataColumns(options);
+      if (!metaCols.isEmpty()) {
+        metaCols.forEach(c -> builder.columnByMetadata(c, DataTypes.STRING(), null, true));
+      }
       final org.apache.flink.table.api.Schema schema = builder.build();
-      return CatalogTable.of(
+      return CatalogUtils.createCatalogTable(
           schema,
-          TableOptionProperties.getComment(options),
           TableOptionProperties.getPartitionColumns(options),
-          TableOptionProperties.getTableOptions(options));
+          TableOptionProperties.getTableOptions(options),
+          TableOptionProperties.getComment(options));
     } else {
       throw new TableNotExistException(getName(), tablePath);
     }
@@ -306,15 +312,15 @@ public class HoodieCatalog extends AbstractCatalog {
     final String tablePathStr = inferTablePath(catalogPathStr, tablePath);
     Map<String, String> options = applyOptionsHook(tablePathStr, catalogTable.getOptions());
     Configuration conf = Configuration.fromMap(options);
-    conf.setString(FlinkOptions.PATH, tablePathStr);
+    conf.set(FlinkOptions.PATH, tablePathStr);
     ResolvedSchema resolvedSchema = resolvedTable.getResolvedSchema();
     if (!resolvedSchema.getPrimaryKey().isPresent() && !conf.containsKey(RECORD_KEY_FIELD.key())) {
       throw new CatalogException("Primary key definition is missing");
     }
-    final String avroSchema = AvroSchemaConverter.convertToSchema(
+    final String avroSchema = HoodieSchemaConverter.convertToSchema(
         resolvedSchema.toPhysicalRowDataType().getLogicalType(),
-        AvroSchemaUtils.getAvroRecordQualifiedName(tablePath.getObjectName())).toString();
-    conf.setString(FlinkOptions.SOURCE_AVRO_SCHEMA, avroSchema);
+        HoodieSchemaUtils.getRecordQualifiedName(tablePath.getObjectName())).toString();
+    conf.set(FlinkOptions.SOURCE_AVRO_SCHEMA, avroSchema);
 
     // stores two copies of options:
     // - partition keys
@@ -326,31 +332,38 @@ public class HoodieCatalog extends AbstractCatalog {
     if (resolvedSchema.getPrimaryKey().isPresent()
             && !conf.containsKey(FlinkOptions.RECORD_KEY_FIELD.key())) {
       final String pkColumns = String.join(",", resolvedSchema.getPrimaryKey().get().getColumns());
-      conf.setString(RECORD_KEY_FIELD, pkColumns);
+      conf.set(RECORD_KEY_FIELD, pkColumns);
     }
 
     if (resolvedSchema.getPrimaryKey().isPresent()) {
       options.put(TableOptionProperties.PK_CONSTRAINT_NAME, resolvedSchema.getPrimaryKey().get().getName());
     }
     if (conf.containsKey(RECORD_KEY_FIELD.key())) {
-      options.put(TableOptionProperties.PK_COLUMNS, conf.getString(RECORD_KEY_FIELD));
+      options.put(TableOptionProperties.PK_COLUMNS, conf.get(RECORD_KEY_FIELD));
     }
 
     // check preCombine
-    StreamerUtil.checkPreCombineKey(conf, resolvedSchema.getColumnNames());
+    StreamerUtil.checkOrderingFields(conf, resolvedSchema.getColumnNames());
 
     if (resolvedTable.isPartitioned()) {
       final String partitions = String.join(",", resolvedTable.getPartitionKeys());
-      conf.setString(FlinkOptions.PARTITION_PATH_FIELD, partitions);
+      conf.set(FlinkOptions.PARTITION_PATH_FIELD, partitions);
       options.put(TableOptionProperties.PARTITION_COLUMNS, partitions);
 
-      final String[] pks = conf.getString(FlinkOptions.RECORD_KEY_FIELD).split(",");
+      final String[] pks = OptionsResolver.getRecordKeyStr(conf).split(",");
       boolean complexHoodieKey = pks.length > 1 || resolvedTable.getPartitionKeys().size() > 1;
       StreamerUtil.checkKeygenGenerator(complexHoodieKey, conf);
     } else {
       conf.setString(FlinkOptions.KEYGEN_CLASS_NAME.key(), NonpartitionedAvroKeyGenerator.class.getName());
     }
-    conf.setString(FlinkOptions.TABLE_NAME, tablePath.getObjectName());
+
+    // check and persist metadata columns
+    List<String> metaCols = DataTypeUtils.getMetadataColumns(resolvedTable.getUnresolvedSchema());
+    if (!metaCols.isEmpty()) {
+      options.put(TableOptionProperties.METADATA_COLUMNS, String.join(",", metaCols));
+    }
+
+    conf.set(FlinkOptions.TABLE_NAME, tablePath.getObjectName());
     try {
       HoodieTableMetaClient metaClient = StreamerUtil.initTableIfNotExists(conf);
       // prepare the non-table-options properties
@@ -580,13 +593,13 @@ public class HoodieCatalog extends AbstractCatalog {
     throw new UnsupportedOperationException("alterPartitionColumnStatistics is not implemented.");
   }
 
-  private @Nullable Schema getLatestTableSchema(String path) {
+  private @Nullable HoodieSchema getLatestTableSchema(String path) {
     if (path != null && StreamerUtil.tableExists(path, hadoopConf)) {
       try {
         HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(path, hadoopConf);
-        return new TableSchemaResolver(metaClient).getTableAvroSchema(false); // change log mode is not supported now
+        return new TableSchemaResolver(metaClient).getTableSchema(false); // change log mode is not supported now
       } catch (Throwable throwable) {
-        LOG.warn("Error while resolving the latest table schema.", throwable);
+        log.warn("Failed to resolve the latest table schema.", throwable);
         // ignored
       }
     }
@@ -603,10 +616,24 @@ public class HoodieCatalog extends AbstractCatalog {
 
   private void refreshTableProperties(ObjectPath tablePath, CatalogBaseTable newCatalogTable) {
     Map<String, String> options = newCatalogTable.getOptions();
-    final String avroSchema = AvroSchemaConverter.convertToSchema(
-        ((ResolvedCatalogTable) newCatalogTable).getResolvedSchema().toPhysicalRowDataType().getLogicalType(),
-        AvroSchemaUtils.getAvroRecordQualifiedName(tablePath.getObjectName())).toString();
+    ResolvedCatalogTable resolvedTable =  (ResolvedCatalogTable) newCatalogTable;
+    final String avroSchema = HoodieSchemaConverter.convertToSchema(
+        resolvedTable.getResolvedSchema().toPhysicalRowDataType().getLogicalType(),
+        HoodieSchemaUtils.getRecordQualifiedName(tablePath.getObjectName())).toString();
     options.put(FlinkOptions.SOURCE_AVRO_SCHEMA.key(), avroSchema);
+    java.util.Optional<UniqueConstraint> pkConstraintOpt = resolvedTable.getResolvedSchema().getPrimaryKey();
+    if (pkConstraintOpt.isPresent()) {
+      options.put(TableOptionProperties.PK_COLUMNS, String.join(",", pkConstraintOpt.get().getColumns()));
+      options.put(TableOptionProperties.PK_CONSTRAINT_NAME, pkConstraintOpt.get().getName());
+    }
+    if (resolvedTable.isPartitioned()) {
+      final String partitions = String.join(",", resolvedTable.getPartitionKeys());
+      options.put(TableOptionProperties.PARTITION_COLUMNS, partitions);
+    }
+    List<String> metaCols = DataTypeUtils.getMetadataColumns(resolvedTable.getUnresolvedSchema());
+    if (!metaCols.isEmpty()) {
+      options.put(TableOptionProperties.METADATA_COLUMNS, String.join(",", metaCols));
+    }
     String tablePathStr = inferTablePath(catalogPathStr, tablePath);
     try {
       TableOptionProperties.overwriteProperties(tablePathStr, hadoopConf, options);

@@ -18,6 +18,7 @@
 
 package org.apache.hudi.sink.bucket;
 
+import org.apache.hudi.adapter.ProcessFunctionAdapter;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.client.model.HoodieFlinkInternalRow;
 import org.apache.hudi.common.fs.FSUtils;
@@ -35,15 +36,13 @@ import org.apache.hudi.index.bucket.ConsistentBucketIdentifier;
 import org.apache.hudi.index.bucket.ConsistentBucketIndexUtils;
 import org.apache.hudi.util.FlinkWriteClients;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
-import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.Preconditions;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -55,9 +54,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * The function to tag each incoming record with a location of a file based on consistent bucket index.
  */
-public class ConsistentBucketAssignFunction extends ProcessFunction<HoodieFlinkInternalRow, HoodieFlinkInternalRow> implements CheckpointedFunction {
-
-  private static final Logger LOG = LoggerFactory.getLogger(ConsistentBucketAssignFunction.class);
+@Slf4j
+public class ConsistentBucketAssignFunction extends ProcessFunctionAdapter<HoodieFlinkInternalRow, HoodieFlinkInternalRow> implements CheckpointedFunction {
 
   private final Configuration config;
   private final List<String> indexKeyFields;
@@ -71,17 +69,19 @@ public class ConsistentBucketAssignFunction extends ProcessFunction<HoodieFlinkI
   public ConsistentBucketAssignFunction(Configuration conf) {
     this.config = conf;
     this.indexKeyFields = Arrays.asList(OptionsResolver.getIndexKeyField(conf).split(","));
-    this.bucketNum = conf.getInteger(FlinkOptions.BUCKET_INDEX_NUM_BUCKETS);
+    this.bucketNum = conf.get(FlinkOptions.BUCKET_INDEX_NUM_BUCKETS);
   }
 
   @Override
   public void open(Configuration parameters) throws Exception {
     try {
-      this.writeClient = FlinkWriteClients.createWriteClient(this.config, getRuntimeContext());
+      // not load fs view storage config for incremental job graph, since embedded timeline server
+      // is started in write coordinator which is started after bucket assigner operator finished
+      this.writeClient = FlinkWriteClients.createWriteClient(this.config, getRuntimeContext(), !OptionsResolver.isIncrementalJobGraph(config));
       this.partitionToIdentifier = new HashMap<>();
       this.lastRefreshInstant = HoodieTimeline.INIT_INSTANT_TS;
     } catch (Throwable e) {
-      LOG.error("Fail to initialize consistent bucket assigner", e);
+      log.error("Fail to initialize consistent bucket assigner", e);
       throw new RuntimeException(e);
     }
   }
@@ -110,7 +110,7 @@ public class ConsistentBucketAssignFunction extends ProcessFunction<HoodieFlinkI
       HoodieConsistentHashingMetadata metadata = null;
       while (retryCount <= maxRetries) {
         try {
-          metadata = ConsistentBucketIndexUtils.loadOrCreateMetadata(this.writeClient.getHoodieTable(), p, bucketNum);
+          metadata = ConsistentBucketIndexUtils.loadOrCreateMetadata(this.writeClient.getHoodieTable(false), p, bucketNum);
           break;
         } catch (Exception e) {
           if (retryCount >= maxRetries) {
@@ -121,7 +121,7 @@ public class ConsistentBucketAssignFunction extends ProcessFunction<HoodieFlinkI
           } catch (InterruptedException ex) {
             // ignore InterruptedException here
           }
-          LOG.info("Retrying to load or create metadata for partition {} for {} times", partition, retryCount + 1);
+          log.info("Retrying to load or create metadata for partition {} for {} times", partition, retryCount + 1);
         } finally {
           retryCount++;
         }
@@ -138,7 +138,7 @@ public class ConsistentBucketAssignFunction extends ProcessFunction<HoodieFlinkI
       for (HoodieInstant instant : timeline.getInstants()) {
         HoodieReplaceCommitMetadata commitMetadata = timeline.readReplaceCommitMetadata(instant);
         Set<String> affectedPartitions = commitMetadata.getPartitionToReplaceFileIds().keySet();
-        LOG.info("Clear up cached hashing metadata because find a new replace commit.\n Instant: {}.\n Effected Partitions: {}.",  lastRefreshInstant, affectedPartitions);
+        log.info("Clear up cached hashing metadata because find a new replace commit.\n Instant: {}.\n Effected Partitions: {}.",  lastRefreshInstant, affectedPartitions);
         affectedPartitions.forEach(this.partitionToIdentifier::remove);
       }
       this.lastRefreshInstant = timeline.lastInstant().get().requestedTime();

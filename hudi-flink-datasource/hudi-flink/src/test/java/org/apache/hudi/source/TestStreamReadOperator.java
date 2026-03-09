@@ -18,6 +18,7 @@
 
 package org.apache.hudi.source;
 
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.configuration.HadoopConfigurations;
@@ -25,16 +26,14 @@ import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.table.format.mor.MergeOnReadInputFormat;
 import org.apache.hudi.table.format.mor.MergeOnReadInputSplit;
 import org.apache.hudi.table.format.mor.MergeOnReadTableState;
-import org.apache.hudi.util.AvroSchemaConverter;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.TestConfigurations;
 import org.apache.hudi.utils.TestData;
 import org.apache.hudi.utils.TestUtils;
 
-import org.apache.avro.Schema;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
-import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 import org.apache.flink.streaming.runtime.tasks.StreamTaskActionExecutor;
 import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
@@ -68,6 +67,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public class TestStreamReadOperator {
   private static final Map<String, String> EXPECTED = new HashMap<>();
+  private static final String TIME_CHARACTERISTIC = "timechar";
 
   static {
     EXPECTED.put("par1", "+I[id1, Danny, 23, 1970-01-01T00:00:00.001, par1], +I[id2, Stephen, 33, 1970-01-01T00:00:00.002, par1]");
@@ -85,7 +85,7 @@ public class TestStreamReadOperator {
   public void before() throws Exception {
     final String basePath = tempFile.getAbsolutePath();
     conf = TestConfigurations.getDefaultConf(basePath);
-    conf.setString(TABLE_TYPE, TABLE_TYPE_MERGE_ON_READ);
+    conf.set(TABLE_TYPE, TABLE_TYPE_MERGE_ON_READ);
 
     StreamerUtil.initTableIfNotExists(conf);
   }
@@ -247,21 +247,20 @@ public class TestStreamReadOperator {
 
     // This input format is used to opening the emitted split.
     TableSchemaResolver schemaResolver = new TableSchemaResolver(metaClient);
-    final Schema tableAvroSchema;
+    final HoodieSchema tableSchema;
     try {
-      tableAvroSchema = schemaResolver.getTableAvroSchema();
+      tableSchema = schemaResolver.getTableSchema();
     } catch (Exception e) {
       throw new HoodieException("Get table avro schema error", e);
     }
-    final DataType rowDataType = AvroSchemaConverter.convertToDataType(tableAvroSchema);
+    final DataType rowDataType = HoodieSchemaConverter.convertToDataType(tableSchema);
     final RowType rowType = (RowType) rowDataType.getLogicalType();
     final MergeOnReadTableState hoodieTableState = new MergeOnReadTableState(
         rowType,
         TestConfigurations.ROW_TYPE,
-        tableAvroSchema.toString(),
-        AvroSchemaConverter.convertToSchema(TestConfigurations.ROW_TYPE).toString(),
-        Collections.emptyList(),
-        new String[0]);
+        tableSchema.toString(),
+        HoodieSchemaConverter.convertToSchema(TestConfigurations.ROW_TYPE).toString(),
+        Collections.emptyList());
     MergeOnReadInputFormat inputFormat = MergeOnReadInputFormat.builder()
         .config(conf)
         .tableState(hoodieTableState)
@@ -272,8 +271,8 @@ public class TestStreamReadOperator {
 
     OneInputStreamOperatorFactory<MergeOnReadInputSplit, RowData> factory = StreamReadOperator.factory(inputFormat);
     OneInputStreamOperatorTestHarness<MergeOnReadInputSplit, RowData> harness = new OneInputStreamOperatorTestHarness<>(
-        factory, 1, 1, 0);
-    harness.getStreamConfig().setTimeCharacteristic(TimeCharacteristic.ProcessingTime);
+            factory, 1, 1, 0);
+    harness.getStreamConfig().getConfiguration().setString(TIME_CHARACTERISTIC, "0");
 
     return harness;
   }

@@ -161,8 +161,8 @@ public abstract class HoodieBackedTableMetadataWriterTableVersionSix<I, O> exten
     Option<HoodieInstant> pendingCompactionInstant =
         metadataMetaClient.getActiveTimeline().filterPendingCompactionTimeline().firstInstant();
     if (pendingLogCompactionInstant.isPresent() || pendingCompactionInstant.isPresent()) {
-      LOG.warn(String.format("Not scheduling compaction or logCompaction, since a pending compaction instant %s or logCompaction %s instant is present",
-          pendingCompactionInstant, pendingLogCompactionInstant));
+      LOG.info("Not scheduling compaction or logCompaction, since a pending compaction instant {} or logCompaction {} instant is present",
+          pendingCompactionInstant, pendingLogCompactionInstant);
       return false;
     }
     return true;
@@ -215,7 +215,7 @@ public abstract class HoodieBackedTableMetadataWriterTableVersionSix<I, O> exten
       processAndCommit(instantTime, () -> HoodieTableMetadataUtil.convertMetadataToRecords(engineContext, dataMetaClient, rollbackMetadata, instantTime));
 
       String rollbackInstantTime = createRollbackTimestamp(instantTime);
-      if (deltacommitsSinceCompaction.containsInstant(deltaCommitInstant)) {
+      if (metadataMetaClient.getActiveTimeline().containsInstant(deltaCommitInstant)) {
         LOG.info("Rolling back MDT deltacommit " + commitToRollbackInstantTime);
         if (!getWriteClient().rollback(commitToRollbackInstantTime, rollbackInstantTime)) {
           throw new HoodieMetadataException("Failed to rollback deltacommit at " + commitToRollbackInstantTime);

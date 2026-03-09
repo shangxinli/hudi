@@ -18,30 +18,33 @@
 
 package org.apache.hudi.common.util;
 
-import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.avro.HoodieAvroWriteSupport;
 import org.apache.hudi.common.bloom.BloomFilter;
 import org.apache.hudi.common.bloom.BloomFilterFactory;
 import org.apache.hudi.common.bloom.BloomFilterTypeCode;
 import org.apache.hudi.common.config.TypedProperties;
-import org.apache.hudi.common.model.HoodieColumnRangeMetadata;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaField;
+import org.apache.hudi.common.schema.HoodieSchemaType;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.keygen.BaseKeyGenerator;
+import org.apache.hudi.stats.HoodieColumnRangeMetadata;
 import org.apache.hudi.storage.StoragePath;
 
-import org.apache.avro.JsonProperties;
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.fs.Path;
 import org.apache.parquet.avro.AvroSchemaConverter;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.parquet.schema.MessageType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -61,9 +64,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.avro.AvroSchemaUtils.createNullableSchema;
-import static org.apache.hudi.avro.HoodieAvroUtils.METADATA_FIELD_SCHEMA;
+import static org.apache.hudi.common.schema.HoodieSchemaUtils.METADATA_FIELD_SCHEMA;
+import static org.apache.hudi.metadata.HoodieIndexVersion.V1;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -151,7 +155,7 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
     }
 
     String filePath = Paths.get(basePath, "test.parquet").toUri().toString();
-    Schema schema = HoodieAvroUtils.getRecordKeyPartitionPathSchema();
+    HoodieSchema schema = HoodieSchemaUtils.getRecordKeyPartitionPathSchema();
     writeParquetFile(typeCode, filePath, rowKeys, schema, true, partitionPath);
 
     // Read and verify
@@ -181,7 +185,7 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
     }
 
     String filePath = Paths.get(basePath, "test.parquet").toUri().toString();
-    Schema schema = getSchemaWithFields(Arrays.asList(new String[] {"abc", "def"}));
+    HoodieSchema schema = getSchemaWithFields(Arrays.asList(new String[] {"abc", "def"}));
     writeParquetFile(BloomFilterTypeCode.SIMPLE.name(), filePath, rowKeys, schema, true, partitionPath,
         false, "abc", "def");
 
@@ -245,16 +249,16 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
     String recordKeyField = "id";
     String partitionPathField = "partition";
     String dataField = "data";
-    Schema schema = getSchema(recordKeyField, partitionPathField, dataField);
+    HoodieSchema schema = getSchema(recordKeyField, partitionPathField, dataField);
 
     BloomFilter filter = BloomFilterFactory
         .createBloomFilter(1000, 0.0001, 10000, BloomFilterTypeCode.SIMPLE.name());
     HoodieAvroWriteSupport writeSupport =
-        new HoodieAvroWriteSupport(new AvroSchemaConverter().convert(schema), schema, Option.of(filter), new Properties());
+        new HoodieAvroWriteSupport(new AvroSchemaConverter().convert(schema.toAvroSchema()), schema, Option.of(filter), new Properties());
     try (ParquetWriter writer = new ParquetWriter(new Path(filePath), writeSupport, CompressionCodecName.GZIP,
         120 * 1024 * 1024, ParquetWriter.DEFAULT_PAGE_SIZE)) {
       valueList.forEach(entry -> {
-        GenericRecord rec = new GenericData.Record(schema);
+        GenericRecord rec = new GenericData.Record(schema.toAvroSchema());
         rec.put(recordKeyField, entry.getLeft().getLeft());
         rec.put(partitionPathField, partitionPath);
         if (entry.getRight()) {
@@ -277,7 +281,7 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
     columnList.add(dataField);
 
     List<HoodieColumnRangeMetadata<Comparable>> columnRangeMetadataList = parquetUtils.readColumnStatsFromMetadata(
-            HoodieTestUtils.getStorage(filePath), new StoragePath(filePath), columnList)
+            HoodieTestUtils.getStorage(filePath), new StoragePath(filePath), columnList, V1)
         .stream()
         .sorted(Comparator.comparing(HoodieColumnRangeMetadata::getColumnName))
         .collect(Collectors.toList());
@@ -290,22 +294,20 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
         fileName, partitionPathField, partitionPath, partitionPath, 0, totalCount);
   }
 
-  private Schema getSchema(String recordKeyField, String partitionPathField, String dataField) {
-    List<Schema.Field> toBeAddedFields = new ArrayList<>();
-    Schema recordSchema = Schema.createRecord("HoodieRecord", "", "", false);
+  private HoodieSchema getSchema(String recordKeyField, String partitionPathField, String dataField) {
+    List<HoodieSchemaField> toBeAddedFields = new ArrayList<>(3);
 
-    Schema.Field recordKeySchemaField =
-        new Schema.Field(recordKeyField, createNullableSchema(Schema.Type.STRING), "", JsonProperties.NULL_VALUE);
-    Schema.Field partitionPathSchemaField =
-        new Schema.Field(partitionPathField, createNullableSchema(Schema.Type.STRING), "", JsonProperties.NULL_VALUE);
-    Schema.Field dataSchemaField =
-        new Schema.Field(dataField, createNullableSchema(Schema.Type.STRING), "", JsonProperties.NULL_VALUE);
+    HoodieSchemaField recordKeySchemaField =
+        HoodieSchemaField.of(recordKeyField, HoodieSchema.createNullable(HoodieSchemaType.STRING), "", HoodieSchema.NULL_VALUE);
+    HoodieSchemaField partitionPathSchemaField =
+        HoodieSchemaField.of(partitionPathField, HoodieSchema.createNullable(HoodieSchemaType.STRING), "", HoodieSchema.NULL_VALUE);
+    HoodieSchemaField dataSchemaField =
+        HoodieSchemaField.of(dataField, HoodieSchema.createNullable(HoodieSchemaType.STRING), "", HoodieSchema.NULL_VALUE);
 
     toBeAddedFields.add(recordKeySchemaField);
     toBeAddedFields.add(partitionPathSchemaField);
     toBeAddedFields.add(dataSchemaField);
-    recordSchema.setFields(toBeAddedFields);
-    return recordSchema;
+    return HoodieSchema.createRecord("HoodieRecord", "", "", false, toBeAddedFields);
   }
 
   private void validateColumnRangeMetadata(HoodieColumnRangeMetadata metadata,
@@ -324,25 +326,25 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
   }
 
   private void writeParquetFile(String typeCode, String filePath, List<String> rowKeys) throws Exception {
-    writeParquetFile(typeCode, filePath, rowKeys, HoodieAvroUtils.getRecordKeySchema(), false, "");
+    writeParquetFile(typeCode, filePath, rowKeys, HoodieSchemaUtils.getRecordKeySchema(), false, "");
   }
 
-  private void writeParquetFile(String typeCode, String filePath, List<String> rowKeys, Schema schema, boolean addPartitionPathField, String partitionPath) throws Exception {
+  private void writeParquetFile(String typeCode, String filePath, List<String> rowKeys, HoodieSchema schema, boolean addPartitionPathField, String partitionPath) throws Exception {
     writeParquetFile(typeCode, filePath, rowKeys, schema, addPartitionPathField, partitionPath,
         true, null, null);
   }
 
-  private void writeParquetFile(String typeCode, String filePath, List<String> rowKeys, Schema schema, boolean addPartitionPathField, String partitionPathValue,
+  private void writeParquetFile(String typeCode, String filePath, List<String> rowKeys, HoodieSchema schema, boolean addPartitionPathField, String partitionPathValue,
                                 boolean useMetaFields, String recordFieldName, String partitionFieldName) throws Exception {
     // Write out a parquet file
     BloomFilter filter = BloomFilterFactory
         .createBloomFilter(1000, 0.0001, 10000, typeCode);
     HoodieAvroWriteSupport writeSupport =
-        new HoodieAvroWriteSupport(new AvroSchemaConverter().convert(schema), schema, Option.of(filter), new Properties());
+        new HoodieAvroWriteSupport(new AvroSchemaConverter().convert(schema.toAvroSchema()), schema, Option.of(filter), new Properties());
     ParquetWriter writer = new ParquetWriter(new Path(filePath), writeSupport, CompressionCodecName.GZIP,
         120 * 1024 * 1024, ParquetWriter.DEFAULT_PAGE_SIZE);
     for (String rowKey : rowKeys) {
-      GenericRecord rec = new GenericData.Record(schema);
+      GenericRecord rec = new GenericData.Record(schema.toAvroSchema());
       rec.put(useMetaFields ? HoodieRecord.RECORD_KEY_METADATA_FIELD : recordFieldName, rowKey);
       if (addPartitionPathField) {
         rec.put(useMetaFields ? HoodieRecord.PARTITION_PATH_METADATA_FIELD : partitionFieldName, partitionPathValue);
@@ -353,17 +355,14 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
     writer.close();
   }
 
-  private static Schema getSchemaWithFields(List<String> fields) {
-    List<Schema.Field> toBeAddedFields = new ArrayList<>();
-    Schema recordSchema = Schema.createRecord("HoodieRecordKey", "", "", false);
-
+  private static HoodieSchema getSchemaWithFields(List<String> fields) {
+    List<HoodieSchemaField> toBeAddedFields = new ArrayList<>(fields.size());
     for (String field: fields) {
-      Schema.Field schemaField =
-          new Schema.Field(field, METADATA_FIELD_SCHEMA, "", JsonProperties.NULL_VALUE);
+      HoodieSchemaField schemaField =
+          HoodieSchemaField.of(field, METADATA_FIELD_SCHEMA, "", HoodieSchema.NULL_VALUE);
       toBeAddedFields.add(schemaField);
     }
-    recordSchema.setFields(toBeAddedFields);
-    return recordSchema;
+    return HoodieSchema.createRecord("HoodieRecordKey", "", "", false, toBeAddedFields);
   }
 
   class TestBaseKeyGen extends BaseKeyGenerator {
@@ -396,5 +395,126 @@ public class TestParquetUtils extends HoodieCommonTestHarness {
     public List<String> getPartitionPathFields() {
       return Arrays.asList(new String[]{partitionField});
     }
+  }
+
+  @Test
+  public void testReadMessageTypeHash() throws Exception {
+    // Given: Create a parquet file with a specific schema
+    List<String> rowKeys = Arrays.asList("row1", "row2", "row3");
+    String filePath = Paths.get(basePath, "test_schema_hash.parquet").toUri().toString();
+    writeParquetFile(BloomFilterTypeCode.SIMPLE.name(), filePath, rowKeys);
+    
+    StoragePath storagePath = new StoragePath(filePath);
+    
+    // When: Reading schema hash
+    Integer schemaHash = ParquetUtils.readSchemaHash(HoodieTestUtils.getStorage(filePath), storagePath);
+    
+    // Then: Should return a valid hash
+    assertTrue(schemaHash != null, "Schema hash should not be null");
+    assertTrue(schemaHash != 0, "Schema hash should not be zero (default error value)");
+    
+    // Verify consistency - reading same file should return same hash
+    Integer secondRead = ParquetUtils.readSchemaHash(HoodieTestUtils.getStorage(filePath), storagePath);
+    assertEquals(schemaHash, secondRead, "Schema hash should be consistent across reads");
+  }
+
+  @Test
+  public void testReadMessageTypeHash_DifferentSchemas() throws Exception {
+    // Given: Create two parquet files with different schemas
+    List<String> rowKeys = Arrays.asList("row1", "row2");
+    
+    // File 1 with original schema
+    String filePath1 = Paths.get(basePath, "test_schema1.parquet").toUri().toString();
+    writeParquetFile(BloomFilterTypeCode.SIMPLE.name(), filePath1, rowKeys);
+    
+    // File 2 with extended schema (add a field)
+    String filePath2 = Paths.get(basePath, "test_schema2.parquet").toUri().toString();
+    writeParquetFileWithExtendedSchema(filePath2, rowKeys);
+    
+    // When: Reading schema hashes from both files
+    Integer hash1 = ParquetUtils.readSchemaHash(HoodieTestUtils.getStorage(filePath1), new StoragePath(filePath1));
+    Integer hash2 = ParquetUtils.readSchemaHash(HoodieTestUtils.getStorage(filePath2), new StoragePath(filePath2));
+    
+    // Then: Should have different hashes for different schemas
+    assertTrue(hash1 != null && hash2 != null, "Both schema hashes should be valid");
+    assertTrue(!hash1.equals(hash2), "Different schemas should have different hash codes");
+  }
+
+  @Test
+  public void testReadMessageTypeHash_NonExistentFile() throws Exception {
+    // Given: Non-existent file path
+    StoragePath nonExistentPath = new StoragePath("/non/existent/file.parquet");
+    
+    // When: Reading schema hash from non-existent file
+    Integer schemaHash = ParquetUtils.readSchemaHash(HoodieTestUtils.getStorage(basePath), nonExistentPath);
+    
+    // Then: Should return 0 (error default value)
+    assertEquals(Integer.valueOf(0), schemaHash, "Non-existent file should return default error value 0");
+  }
+
+  @Test
+  public void testReadSchemaHash_MatchesDirectSchemaRead() throws Exception {
+    // Given: Create a parquet file
+    List<String> rowKeys = Arrays.asList("row1", "row2", "row3");
+    String filePath = Paths.get(basePath, "test_direct_schema.parquet").toUri().toString();
+    writeParquetFile(BloomFilterTypeCode.SIMPLE.name(), filePath, rowKeys);
+    
+    StoragePath storagePath = new StoragePath(filePath);
+    
+    // When: Reading schema hash vs direct schema read
+    Integer schemaHashFromUtils = ParquetUtils.readSchemaHash(HoodieTestUtils.getStorage(filePath), storagePath);
+    MessageType directSchema = parquetUtils.readMessageType(HoodieTestUtils.getStorage(filePath), storagePath);
+    Integer directSchemaHash = directSchema.hashCode();
+    
+    // Then: Hash from utility method should match direct schema hash
+    assertEquals(directSchemaHash, schemaHashFromUtils, 
+        "Schema hash from utility should match direct schema.hashCode()");
+  }
+
+  private void writeParquetFileWithExtendedSchema(String filePath, List<String> rowKeys) throws Exception {
+    // Create an extended schema with an additional field
+    List<HoodieSchemaField> fields = new ArrayList<>(4);
+    fields.add(HoodieSchemaField.of("_row_key", HoodieSchema.create(HoodieSchemaType.STRING), "", (Object) null));
+    fields.add(HoodieSchemaField.of("time", HoodieSchema.create(HoodieSchemaType.LONG), "", (Object) null));
+    fields.add(HoodieSchemaField.of("number", HoodieSchema.create(HoodieSchemaType.LONG), "", (Object) null));
+    fields.add(HoodieSchemaField.of("extra_field", HoodieSchema.createNullable(HoodieSchemaType.STRING), "", HoodieSchema.NULL_VALUE)); // Additional field
+    HoodieSchema extendedSchema = HoodieSchema.createRecord("record", "", "", false, fields);
+
+    BloomFilter filter = BloomFilterFactory.createBloomFilter(1000, 0.0001, -1, BloomFilterTypeCode.SIMPLE.name());
+
+    HoodieAvroWriteSupport writeSupport = new HoodieAvroWriteSupport(
+        new AvroSchemaConverter().convert(extendedSchema.toAvroSchema()), extendedSchema, Option.of(filter), new Properties());
+
+    ParquetWriter writer = new ParquetWriter(new Path(filePath), writeSupport, CompressionCodecName.GZIP,
+        120 * 1024 * 1024, ParquetWriter.DEFAULT_PAGE_SIZE);
+
+    for (String rowKey : rowKeys) {
+      GenericRecord record = new GenericData.Record(extendedSchema.toAvroSchema());
+      record.put("_row_key", rowKey);
+      record.put("time", 1234567L);
+      record.put("number", 12345L);
+      record.put("extra_field", "extra_value"); // Set the extra field
+      writer.write(record);
+      writeSupport.add(rowKey);
+    }
+    writer.close();
+  }
+
+  @Test
+  public void testReadParquetMetadata() throws Exception {
+    List<String> rowKeys = new ArrayList<>();
+    for (int i = 0; i < 1000; i++) {
+      rowKeys.add(UUID.randomUUID().toString());
+    }
+
+    String filePath = Paths.get(basePath, "test.parquet").toUri().toString();
+    writeParquetFile(BloomFilterTypeCode.SIMPLE.name(), filePath, rowKeys);
+
+    ParquetMetadata metadata = parquetUtils.readMetadata(HoodieTestUtils.getStorage(filePath), new StoragePath(filePath));
+    ParquetMetadata metadataWithSkipRowGroups = parquetUtils.readFileMetadataOnly(HoodieTestUtils.getStorage(filePath), new StoragePath(filePath));
+    assertTrue(metadata.getFileMetaData() != null);
+    assertTrue(metadataWithSkipRowGroups.getFileMetaData() != null);
+    assertFalse(metadata.getBlocks().isEmpty());
+    assertTrue(metadataWithSkipRowGroups.getBlocks().isEmpty());
   }
 }

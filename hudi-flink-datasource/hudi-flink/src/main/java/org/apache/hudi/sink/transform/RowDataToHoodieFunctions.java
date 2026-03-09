@@ -21,6 +21,8 @@ package org.apache.hudi.sink.transform;
 import org.apache.hudi.client.model.HoodieFlinkInternalRow;
 import org.apache.hudi.configuration.FlinkOptions;
 
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.RowType;
@@ -28,15 +30,14 @@ import org.apache.flink.table.types.logical.RowType;
 /**
  * Utilities for {@link RowDataToHoodieFunction} to handle rate limit if it was set.
  */
+@NoArgsConstructor(access = AccessLevel.PRIVATE)
 public abstract class RowDataToHoodieFunctions {
-  private RowDataToHoodieFunctions() {
-  }
 
   /**
    * Creates a {@link RowDataToHoodieFunction} instance based on the given configuration.
    */
   public static RowDataToHoodieFunction<RowData, HoodieFlinkInternalRow> create(RowType rowType, Configuration conf) {
-    if (conf.getLong(FlinkOptions.WRITE_RATE_LIMIT) > 0) {
+    if (conf.get(FlinkOptions.WRITE_RATE_LIMIT) > 0) {
       return new RowDataToHoodieFunctionWithRateLimit<>(rowType, conf);
     } else {
       return new RowDataToHoodieFunction<>(rowType, conf);

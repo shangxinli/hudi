@@ -80,6 +80,14 @@ public class HoodieStorageConfig extends HoodieConfig {
       .markAdvanced()
       .withDocumentation("Target file size in bytes for HFile base files.");
 
+  public static final ConfigProperty<Boolean> HFILE_WRITER_TO_ALLOW_DUPLICATES = ConfigProperty
+      .key("hoodie.hfile.writes.allow.duplicates")
+      .defaultValue(false)
+      .withDocumentation("When bootstrapping RI, if the main dataset contains duplicates then "
+          + "it will fail the bootstrap job. TO avoid the failure and bootstrap the RI with dups"
+          + " this config can be set to true. One thing to note is that, there is no deterministic"
+          + " way to specify which among these records will be ingested into RI.");
+
   public static final ConfigProperty<String> HFILE_BLOCK_SIZE = ConfigProperty
       .key("hoodie.hfile.block.size")
       .defaultValue(String.valueOf(1024 * 1024))
@@ -264,7 +272,7 @@ public class HoodieStorageConfig extends HoodieConfig {
 
   public static final ConfigProperty<String> HOODIE_IO_FACTORY_CLASS = ConfigProperty
       .key("hoodie.io.factory.class")
-      .defaultValue("org.apache.hudi.io.hadoop.HoodieHadoopIOFactory")
+      .defaultValue("org.apache.hudi.io.storage.hadoop.HoodieHadoopIOFactory")
       .markAdvanced()
       .sinceVersion("0.15.0")
       .withDocumentation("The fully-qualified class name of the factory class to return readers and writers of files used "
@@ -429,6 +437,11 @@ public class HoodieStorageConfig extends HoodieConfig {
       return this;
     }
 
+    public Builder allowDuplicatesWithHfileWrites(boolean allowDuplicatesToBeInserted) {
+      storageConfig.setValue(HFILE_WRITER_TO_ALLOW_DUPLICATES, String.valueOf(allowDuplicatesToBeInserted));
+      return this;
+    }
+
     public Builder hfileBlockSize(int blockSize) {
       storageConfig.setValue(HFILE_BLOCK_SIZE, String.valueOf(blockSize));
       return this;
@@ -521,6 +534,50 @@ public class HoodieStorageConfig extends HoodieConfig {
 
     public Builder withWriteUtcTimezone(boolean writeUtcTimezone) {
       storageConfig.setValue(WRITE_UTC_TIMEZONE, String.valueOf(writeUtcTimezone));
+      return this;
+    }
+
+    /**
+     * Sets the bloom filter type for the configuration.
+     *
+     * @param bloomFilterType The bloom filter type (SIMPLE or DYNAMIC_V0)
+     * @return this builder instance for method chaining
+     */
+    public Builder withBloomFilterType(String bloomFilterType) {
+      storageConfig.setValue(BLOOM_FILTER_TYPE, bloomFilterType);
+      return this;
+    }
+
+    /**
+     * Sets the number of entries to be stored in the bloom filter.
+     *
+     * @param numEntries The number of entries for the bloom filter
+     * @return this builder instance for method chaining
+     */
+    public Builder withBloomFilterNumEntries(int numEntries) {
+      storageConfig.setValue(BLOOM_FILTER_NUM_ENTRIES_VALUE, String.valueOf(numEntries));
+      return this;
+    }
+
+    /**
+     * Sets the false positive probability (FPP) for the bloom filter.
+     *
+     * @param fpp The false positive probability as a double
+     * @return this builder instance for method chaining
+     */
+    public Builder withBloomFilterFpp(double fpp) {
+      storageConfig.setValue(BLOOM_FILTER_FPP_VALUE, String.valueOf(fpp));
+      return this;
+    }
+
+    /**
+     * Sets the maximum number of entries for dynamic bloom filter.
+     *
+     * @param maxEntries The maximum number of entries for dynamic bloom filter
+     * @return this builder instance for method chaining
+     */
+    public Builder withBloomFilterDynamicMaxEntries(int maxEntries) {
+      storageConfig.setValue(BLOOM_FILTER_DYNAMIC_MAX_ENTRIES, String.valueOf(maxEntries));
       return this;
     }
 

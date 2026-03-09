@@ -28,6 +28,8 @@ import org.apache.hudi.common.table.timeline.TimelineFactory;
 import org.apache.hudi.common.table.view.FileSystemViewManager;
 import org.apache.hudi.metadata.TableMetadataFactory;
 
+import lombok.NoArgsConstructor;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -39,12 +41,10 @@ import java.util.function.Supplier;
  * Test implementation of HoodieTableFormat that records all Hoodie instants in memory.
  * Used for functional testing of HoodieTableFormat.
  */
+@NoArgsConstructor
 public class TestTableFormat implements HoodieTableFormat {
 
   private static final Map<String, List<HoodieInstant>> RECORDED_INSTANTS = new ConcurrentHashMap<>();
-  
-  public TestTableFormat() {
-  }
 
   public static List<HoodieInstant> getRecordedInstants(String basePath) {
     return RECORDED_INSTANTS.getOrDefault(basePath, Collections.emptyList());
@@ -81,9 +81,9 @@ public class TestTableFormat implements HoodieTableFormat {
   }
 
   @Override
-  public void rollback(HoodieInstant completedInstant, HoodieEngineContext engineContext, 
+  public void rollback(HoodieInstant instantToRollback, HoodieEngineContext engineContext,
                       HoodieTableMetaClient metaClient, FileSystemViewManager viewManager) {
-    // No-op.
+    RECORDED_INSTANTS.get(metaClient.getBasePath().toString()).remove(instantToRollback);
   }
 
   @Override
@@ -97,6 +97,11 @@ public class TestTableFormat implements HoodieTableFormat {
   public void savepoint(HoodieInstant savepointInstant, HoodieEngineContext engineContext, 
                        HoodieTableMetaClient metaClient, FileSystemViewManager viewManager) {
     RECORDED_INSTANTS.get(metaClient.getBasePath().toString()).add(savepointInstant);
+  }
+
+  @Override
+  public void restore(HoodieInstant restoreCompletedInstant, HoodieEngineContext engineContext, HoodieTableMetaClient metaClient, FileSystemViewManager viewManager) {
+    RECORDED_INSTANTS.get(metaClient.getBasePath().toString()).add(restoreCompletedInstant);
   }
 
   @Override

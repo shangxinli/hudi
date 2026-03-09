@@ -19,8 +19,9 @@ package org.apache.hudi
 
 import org.apache.hudi.DataSourceWriteOptions.{DROP_INSERT_DUP_POLICY, FAIL_INSERT_DUP_POLICY, INSERT_DROP_DUPS, INSERT_DUP_POLICY}
 import org.apache.hudi.client.SparkRDDWriteClient
-import org.apache.hudi.common.config.{HoodieConfig, HoodieMetadataConfig}
+import org.apache.hudi.common.config.{HoodieConfig, HoodieMetadataConfig, RecordMergeMode}
 import org.apache.hudi.common.model.{DefaultHoodieRecordPayload, HoodieFileFormat, HoodieRecord, HoodieRecordPayload, HoodieReplaceCommitMetadata, HoodieTableType, WriteOperationType}
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.common.table.timeline.TimelineUtils
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator
@@ -33,7 +34,6 @@ import org.apache.hudi.keygen.{ComplexKeyGenerator, NonpartitionedKeyGenerator, 
 import org.apache.hudi.testutils.{DataSourceTestUtils, HoodieClientTestUtils}
 import org.apache.hudi.testutils.HoodieClientTestUtils.createMetaClient
 
-import org.apache.avro.Schema
 import org.apache.commons.io.FileUtils
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
@@ -84,7 +84,7 @@ class TestHoodieSparkSqlWriter extends HoodieSparkWriterTestBase {
 
     // generate the inserts
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     val inserts = DataSourceTestUtils.generateRandomRows(1000)
 
     // add some updates so that preCombine kicks in
@@ -307,7 +307,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     option(DataSourceWriteOptions.PARTITIONPATH_FIELD.key(), "city").
     option(HoodieWriteConfig.TBL_NAME.key(), hoodieFooTableName).
     option("hoodie.datasource.write.recordkey.field", "uuid").
-    option("hoodie.datasource.write.precombine.field", "rider").
+    option(HoodieTableConfig.ORDERING_FIELDS.key(), "rider").
     option("hoodie.datasource.write.operation", "bulk_insert").
     option("hoodie.datasource.write.hive_style_partitioning", "true").
     option("hoodie.populate.meta.fields", "false").
@@ -317,7 +317,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
 
   // Ensure the partition column (i.e 'city') can be read back
   val tripsDF = spark.read.format("hudi").load(tempBasePath)
-  tripsDF.show()
+  tripsDF.collect()
   tripsDF.select("city").foreach(row => {
     assertNotNull(row)
   })
@@ -329,7 +329,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     partitionPaths(i) = String.format("%s/%s/*", tempBasePath, partitions(i))
   }
   val rawFileDf = spark.sqlContext.read.parquet(partitionPaths(0), partitionPaths(1), partitionPaths(2))
-  rawFileDf.show()
+  rawFileDf.collect()
   rawFileDf.select("city").foreach(row => {
     assertNull(row.get(0))
   })
@@ -350,7 +350,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
 
     // generate the inserts
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     val inserts = DataSourceTestUtils.generateRandomRows(1000)
     val df = spark.createDataFrame(sc.parallelize(inserts.asScala.toSeq), structType)
     try {
@@ -377,7 +377,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
 
       // generate the inserts
       val schema = DataSourceTestUtils.getStructTypeExampleSchema
-      val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+      val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
       val records = DataSourceTestUtils.generateRandomRows(100)
       val recordsSeq = convertRowListToSeq(records)
       val df = spark.createDataFrame(spark.sparkContext.parallelize(recordsSeq), structType)
@@ -390,22 +390,22 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
   }
 
   /**
-   * Test case for insert dataset without precombine field.
+   * Test case for insert dataset without ordering fields.
    */
   @Test
-  def testInsertDatasetWithoutPrecombineField(): Unit = {
+  def testInsertDatasetWithoutOrderingField(): Unit = {
 
     val fooTableModifier = commonTableModifier.updated(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
       .updated(DataSourceWriteOptions.INSERT_DROP_DUPS.key, "false")
 
     // generate the inserts
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     val records = DataSourceTestUtils.generateRandomRows(100)
     val recordsSeq = convertRowListToSeq(records)
     val df = spark.createDataFrame(sc.parallelize(recordsSeq), structType)
     // write to Hudi
-    HoodieSparkSqlWriter.write(sqlContext, SaveMode.Append, fooTableModifier - DataSourceWriteOptions.PRECOMBINE_FIELD.key, df)
+    HoodieSparkSqlWriter.write(sqlContext, SaveMode.Append, fooTableModifier - HoodieTableConfig.ORDERING_FIELDS.key, df)
 
     // collect all partition paths to issue read of parquet files
     val partitions = Seq(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, HoodieTestDataGenerator.DEFAULT_SECOND_PARTITION_PATH,
@@ -434,7 +434,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
 
     // generate the inserts
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     val records = DataSourceTestUtils.generateRandomRows(1)
     val recordsSeq = convertRowListToSeq(records)
     val df = spark.createDataFrame(sc.parallelize(recordsSeq), structType)
@@ -461,7 +461,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
       fullPartitionPaths(i) = String.format("%s/%s/*", tempBasePath, partitions(i))
     }
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     var totalExpectedDf = spark.createDataFrame(sc.emptyRDD[Row], structType)
     for (_ <- 0 to 2) {
       // generate the inserts
@@ -506,8 +506,8 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val fooTableParams = HoodieWriterUtils.parametersWithWriteDefaults(fooTableModifier)
     // generate the inserts
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
-    val modifiedSchema = AvroConversionUtils.convertStructTypeToAvroSchema(structType, "trip", "example.schema")
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
+    val modifiedSchema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(structType, "trip", "example.schema")
     val records = DataSourceTestUtils.generateRandomRows(100)
     val recordsSeq = convertRowListToSeq(records)
     val df = spark.createDataFrame(sc.parallelize(recordsSeq), structType)
@@ -614,14 +614,24 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
       .setBaseFileFormat(fooTableParams.getOrElse(HoodieWriteConfig.BASE_FILE_FORMAT.key,
         HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().name))
       .setArchiveLogFolder(HoodieTableConfig.TIMELINE_HISTORY_PATH.defaultValue())
-      .setPreCombineField(fooTableParams.getOrElse(DataSourceWriteOptions.PRECOMBINE_FIELD.key, null))
+      .setOrderingFields(fooTableParams.getOrElse(HoodieTableConfig.ORDERING_FIELDS.key, null))
       .setPartitionFields(fooTableParams(DataSourceWriteOptions.PARTITIONPATH_FIELD.key))
       .setKeyGeneratorClassProp(fooTableParams.getOrElse(DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key,
         DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.defaultValue()))
-      if(addBootstrapPath) {
-        tableMetaClientBuilder
-          .setBootstrapBasePath(fooTableParams(HoodieBootstrapConfig.BASE_PATH.key))
-      }
+    if (fooTableParams.contains(HoodieWriteConfig.WRITE_PAYLOAD_CLASS_NAME.key())) {
+      tableMetaClientBuilder.setPayloadClassName(fooTableParams(HoodieWriteConfig.WRITE_PAYLOAD_CLASS_NAME.key))
+    }
+    if (fooTableParams.contains(HoodieWriteConfig.RECORD_MERGE_MODE.key)) {
+      tableMetaClientBuilder.setRecordMergeMode(RecordMergeMode.valueOf(
+        fooTableParams(HoodieWriteConfig.RECORD_MERGE_MODE.key)))
+    }
+    if (fooTableParams.contains(HoodieWriteConfig.RECORD_MERGE_STRATEGY_ID.key)) {
+      tableMetaClientBuilder.setRecordMergeStrategyId(fooTableParams(HoodieWriteConfig.RECORD_MERGE_STRATEGY_ID.key))
+    }
+    if(addBootstrapPath) {
+      tableMetaClientBuilder
+        .setBootstrapBasePath(fooTableParams(HoodieBootstrapConfig.BASE_PATH.key))
+    }
     if (initBasePath) {
       tableMetaClientBuilder.initTable(HadoopFSUtils.getStorageConfWithCopy(sc.hadoopConfiguration), tempBasePath)
     }
@@ -651,7 +661,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
 
     // Generate 1st batch
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     var records = DataSourceTestUtils.generateRandomRows(10)
     var recordsSeq = convertRowListToSeq(records)
 
@@ -676,7 +686,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
 
     // Generate 3d batch (w/ evolved schema w/ added column)
     val evolSchema = DataSourceTestUtils.getStructTypeExampleEvolvedSchema
-    val evolStructType = AvroConversionUtils.convertAvroSchemaToStructType(evolSchema)
+    val evolStructType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(evolSchema)
     records = DataSourceTestUtils.generateRandomRowsEvolvedSchema(5)
     recordsSeq = convertRowListToSeq(records)
 
@@ -715,7 +725,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val fourthBatchActualSchema = fetchActualSchema()
     val fourthBatchExpectedSchema = {
       val (structName, nameSpace) = AvroConversionUtils.getAvroRecordNameAndNamespace(hoodieFooTableName)
-      AvroConversionUtils.convertStructTypeToAvroSchema(evolStructType, structName, nameSpace)
+      HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(evolStructType, structName, nameSpace)
     }
 
     assertEquals(fourthBatchExpectedSchema, fourthBatchActualSchema)
@@ -750,7 +760,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val fifthBatchActualSchema = fetchActualSchema()
     val fifthBatchExpectedSchema = {
       val (structName, nameSpace) = AvroConversionUtils.getAvroRecordNameAndNamespace(hoodieFooTableName)
-      AvroConversionUtils.convertStructTypeToAvroSchema(df5.schema, structName, nameSpace)
+      HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(df5.schema, structName, nameSpace)
     }
     assertEquals(fifthBatchExpectedSchema, fifthBatchActualSchema)
   }
@@ -763,7 +773,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     List(DataSourceWriteOptions.COW_TABLE_TYPE_OPT_VAL, DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL).foreach { tableType =>
       val baseBootStrapPath = tempBootStrapPath.toAbsolutePath.toString
       val options = Map(DataSourceWriteOptions.TABLE_TYPE.key -> tableType,
-        DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "col3",
+        HoodieTableConfig.ORDERING_FIELDS.key -> "col3",
         DataSourceWriteOptions.RECORDKEY_FIELD.key -> "keyid",
         DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "",
         DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
@@ -823,7 +833,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
   def deletePartitionSetup(): (DataFrame, Map[String,String]) = {
     val fooTableModifier = getCommonParams(tempPath, hoodieFooTableName, HoodieTableType.COPY_ON_WRITE.name())
     val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
     val records = DataSourceTestUtils.generateRandomRows(10)
     val recordsSeq = convertRowListToSeq(records)
     val df1 = spark.createDataFrame(sc.parallelize(recordsSeq), structType)
@@ -885,7 +895,8 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val partitionStatsIndex = new PartitionStatsIndexSupport(
       spark,
       inputDf.schema,
-      HoodieMetadataConfig.newBuilder().enable(true).withMetadataIndexPartitionStats(true).build(),
+      HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(inputDf.schema, "record", ""),
+      HoodieMetadataConfig.newBuilder().enable(true).build(),
       metaClient)
     val partitionStats = partitionStatsIndex.loadColumnStatsIndexRecords(List("partition", "ts"), shouldReadInMemory = true).collectAsList()
     partitionStats.forEach(stat => {
@@ -928,7 +939,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val recordsToDelete = spark.emptyDataFrame
     HoodieSparkSqlWriter.write(sqlContext, SaveMode.Append, fooTableModifier, recordsToDelete)
     val snapshotDF3 = spark.read.format("org.apache.hudi").load(tempBasePath)
-    snapshotDF3.show()
+    snapshotDF3.count()
     assertEquals(0, snapshotDF3.filter(entry => {
       val partitionPath = entry.getString(3)
       expectedPartitions.count(p => partitionPath.equals(p)) != 1
@@ -963,7 +974,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
   @EnumSource(value = classOf[HoodieTableType])
   def testNonPartitionTableWithMetatableSupport(tableType: HoodieTableType): Unit = {
     val options = Map(DataSourceWriteOptions.TABLE_TYPE.key -> tableType.name,
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "col3",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "col3",
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "keyid",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "",
       DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
@@ -989,10 +1000,10 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
   }
 
   /**
-   * Test upsert for CoW table without precombine field and combine before upsert disabled.
+   * Test upsert for CoW table without ordering fields and combine before upsert disabled.
    */
   @Test
-  def testUpsertWithoutPrecombineFieldAndCombineBeforeUpsertDisabled(): Unit = {
+  def testUpsertWithoutOrderingFieldsAndCombineBeforeUpsertDisabled(): Unit = {
     val options = Map(DataSourceWriteOptions.TABLE_TYPE.key -> HoodieTableType.COPY_ON_WRITE.name(),
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "keyid",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "",
@@ -1000,7 +1011,8 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       HoodieWriteConfig.COMBINE_BEFORE_UPSERT.key -> "false",
       "hoodie.insert.shuffle.parallelism" -> "1",
-      "hoodie.upsert.shuffle.parallelism" -> "1"
+      "hoodie.upsert.shuffle.parallelism" -> "1",
+      HoodieWriteConfig.MERGE_HANDLE_CLASS_NAME.key -> "org.apache.hudi.io.HoodieWriteMergeHandle"
     )
 
     val df = spark.range(0, 10).toDF("keyid")
@@ -1048,7 +1060,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
   def testUpsertWithCombineBeforeUpsertDisabled(tableType: HoodieTableType): Unit = {
     val options = Map(
       DataSourceWriteOptions.TABLE_TYPE.key -> tableType.name,
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "col3",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "col3",
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "keyid",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "",
       DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> "org.apache.hudi.keygen.NonpartitionedKeyGenerator",
@@ -1079,7 +1091,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val df = Seq((1, "a1", 10, 1000L, "2021-10-16")).toDF("id", "name", "value", "ts", "dt")
     val options = Map(
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "id",
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "ts",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "ts",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "dt"
     )
 
@@ -1097,7 +1109,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
          | partitioned by (dt)
          | options (
          |  primaryKey = 'id',
-         |  preCombineField = 'ts'
+         |  orderingFields = 'ts'
          | )
          | location '$tablePath1'
        """.stripMargin)
@@ -1154,7 +1166,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val df = Seq((1, "a1", 10, 1000, "2021-10-16")).toDF("id", "name", "value", "ts", "dt")
     val options = Map(
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "id",
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "ts"
+      HoodieTableConfig.ORDERING_FIELDS.key -> "ts"
     )
 
     // case 1: When commit C1 specifies a key generator and commit C2 does not specify key generator
@@ -1182,7 +1194,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val df = Seq((1, "a1", 10, 1000, "2021-10-16")).toDF("id", "name", "value", "ts", "dt")
     val options = Map(
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "id",
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "ts",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "ts",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "dt"
     )
 
@@ -1214,7 +1226,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val df = Seq((1, "a1", 10, 1000, "2021-10-16")).toDF("id", "name", "value", "ts", "dt")
     val options = Map(
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "id",
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "ts",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "ts",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "dt"
     )
 
@@ -1246,7 +1258,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val df = Seq((1, "a1", 10, 1000, "2021-10-16")).toDF("id", "name", "value", "ts", "dt")
     val options = Map(
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "id",
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "ts",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "ts",
       DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "dt"
     )
 
@@ -1301,7 +1313,7 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     val df = Seq((1, "a1", 10, 1000, "2021-10-16")).toDF("id", "name", "value", "ts", "dt")
     val options = Map(
       DataSourceWriteOptions.RECORDKEY_FIELD.key -> "id",
-      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "ts",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "ts",
       HoodieIndexConfig.BUCKET_INDEX_ENGINE_TYPE.key -> "CONSISTENT_HASHING",
       HoodieIndexConfig.INDEX_TYPE.key -> "BUCKET"
     )
@@ -1367,9 +1379,9 @@ def testBulkInsertForDropPartitionColumn(): Unit = {
     assertTrue(HoodieSparkSqlWriterInternal.isDeduplicationNeeded(WriteOperationType.INSERT))
   }
 
-  private def fetchActualSchema(): Schema = {
+  private def fetchActualSchema(): HoodieSchema = {
     val tableMetaClient = createMetaClient(spark, tempBasePath)
-    new TableSchemaResolver(tableMetaClient).getTableAvroSchema(false)
+    new TableSchemaResolver(tableMetaClient).getTableSchema(false)
   }
 }
 

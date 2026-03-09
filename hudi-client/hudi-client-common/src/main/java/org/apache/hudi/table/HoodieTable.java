@@ -18,8 +18,6 @@
 
 package org.apache.hudi.table;
 
-import org.apache.hudi.avro.AvroSchemaUtils;
-import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
 import org.apache.hudi.avro.model.HoodieCleanerPlan;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
@@ -37,6 +35,7 @@ import org.apache.hudi.common.HoodiePendingRollbackInfo;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
+import org.apache.hudi.common.engine.ReaderContextFactory;
 import org.apache.hudi.common.engine.TaskContextSupplier;
 import org.apache.hudi.common.fs.ConsistencyGuard;
 import org.apache.hudi.common.fs.ConsistencyGuard.FileVisibility;
@@ -45,8 +44,14 @@ import org.apache.hudi.common.fs.FailSafeConsistencyGuard;
 import org.apache.hudi.common.fs.OptimisticConsistencyGuard;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
 import org.apache.hudi.common.model.HoodieFileFormat;
+import org.apache.hudi.common.model.HoodieIndexDefinition;
+import org.apache.hudi.common.model.HoodieIndexMetadata;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieWriteStat;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaCompatibility;
+import org.apache.hudi.common.schema.HoodieSchemaField;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
@@ -69,15 +74,14 @@ import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.exception.HoodieDuplicateDataFileDetectedException;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieInsertException;
-import org.apache.hudi.exception.HoodieDuplicateDataFileDetectedException;
 import org.apache.hudi.exception.HoodieMetadataException;
 import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.exception.SchemaCompatibilityException;
 import org.apache.hudi.index.HoodieIndex;
-import org.apache.hudi.io.HoodieMergeHandle;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metadata.MetadataPartitionType;
@@ -86,16 +90,14 @@ import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.bootstrap.HoodieBootstrapWriteMetadata;
-import org.apache.hudi.table.action.commit.HoodieMergeHelper;
 import org.apache.hudi.table.marker.WriteMarkers;
 import org.apache.hudi.table.marker.WriteMarkersFactory;
 import org.apache.hudi.table.storage.HoodieLayoutFactory;
 import org.apache.hudi.table.storage.HoodieStorageLayout;
 import org.apache.hudi.util.CommonClientUtils;
 
-import org.apache.avro.Schema;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -104,6 +106,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -131,18 +134,25 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.metadataPartition
  * @param <K> Type of keys
  * @param <O> Type of outputs
  */
+@Slf4j
 public abstract class HoodieTable<T, I, K, O> implements Serializable {
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieTable.class);
 
+  @Getter
   protected final HoodieWriteConfig config;
+  @Getter
   protected final HoodieTableMetaClient metaClient;
   private transient HoodieIndex<?, ?> index;
+  @Getter
   protected final TaskContextSupplier taskContextSupplier;
   private transient HoodieTableMetadata metadata;
   private transient HoodieStorageLayout storageLayout;
+  @Getter
   private final InstantGenerator instantGenerator;
+  @Getter
   private final InstantFileNameGenerator instantFileNameGenerator;
+  @Getter
   private final InstantFileNameParser instantFileNameParser;
+  @Getter
   private final boolean isMetadataTable;
 
   private transient FileSystemViewManager viewManager;
@@ -173,10 +183,6 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     this.taskContextSupplier = supplier;
   }
 
-  public boolean isMetadataTable() {
-    return isMetadataTable;
-  }
-
   public HoodieTableVersion version() {
     return metaClient.getTableConfig().getTableVersion();
   }
@@ -185,7 +191,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
 
   public synchronized FileSystemViewManager getViewManager() {
     if (null == viewManager) {
-      viewManager = FileSystemViewManager.createViewManager(getContext(), config.getMetadataConfig(), config.getViewStorageConfig(), config.getCommonConfig(), unused -> getMetadataTable());
+      viewManager = FileSystemViewManager.createViewManager(getContext(), config.getMetadataConfig(), config.getViewStorageConfig(), config.getCommonConfig(), unused -> getTableMetadata());
     }
     return viewManager;
   }
@@ -316,26 +322,6 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @return HoodieWriteMetadata
    */
   public abstract HoodieWriteMetadata<O> managePartitionTTL(HoodieEngineContext context, String instantTime);
-
-  public HoodieWriteConfig getConfig() {
-    return config;
-  }
-
-  public HoodieTableMetaClient getMetaClient() {
-    return metaClient;
-  }
-
-  public InstantGenerator getInstantGenerator() {
-    return instantGenerator;
-  }
-
-  public InstantFileNameGenerator getInstantFileNameGenerator() {
-    return instantFileNameGenerator;
-  }
-
-  public InstantFileNameParser getInstantFileNameParser() {
-    return instantFileNameParser;
-  }
 
   /**
    * @return if the table is physically partitioned, based on the partition fields stored in the table config.
@@ -771,7 +757,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
             .collect(Collectors.toList()),
         partitionFilePair -> {
           final HoodieStorage storage = metaClient.getStorage();
-          LOG.info("Deleting invalid data file=" + partitionFilePair);
+          log.info("Deleting invalid data file=" + partitionFilePair);
           // Delete
           try {
             StoragePath pathToDelete = new StoragePath(partitionFilePair.getValue());
@@ -806,10 +792,10 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @throws HoodieIOException
    */
   void reconcileAgainstMarkers(HoodieEngineContext context,
-                                         String instantTs,
-                                         List<HoodieWriteStat> stats,
-                                         boolean consistencyCheckEnabled,
-                                         boolean shouldFailOnDuplicateDataFileDetection,
+                               String instantTs,
+                               List<HoodieWriteStat> stats,
+                               boolean consistencyCheckEnabled,
+                               boolean shouldFailOnDuplicateDataFileDetection,
                                WriteMarkers markers) throws HoodieIOException {
     try {
       // Reconcile marker and data files with WriteStats so that partially written data-files due to failed
@@ -842,7 +828,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
           throw new HoodieDuplicateDataFileDetectedException("Duplicate data files detected " + invalidDataPaths);
         }
 
-        LOG.info("Removing duplicate files created due to task retries before committing. Paths=" + invalidDataPaths);
+        log.info("Removing duplicate files created due to task retries before committing. Paths=" + invalidDataPaths);
         Map<String, List<Pair<String, String>>> invalidPathsByPartition = invalidDataPaths.stream()
             .map(dp ->
                 Pair.of(new StoragePath(basePath, dp).getParent().toString(),
@@ -897,7 +883,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
       getConsistencyGuard(storage, config.getConsistencyGuardConfig())
           .waitTill(partitionPath, fileList, visibility);
     } catch (IOException | TimeoutException ioe) {
-      LOG.error("Got exception while waiting for files to show up", ioe);
+      log.error("Got exception while waiting for files to show up", ioe);
       return false;
     }
     return true;
@@ -920,17 +906,13 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     }
   }
 
-  public TaskContextSupplier getTaskContextSupplier() {
-    return taskContextSupplier;
-  }
-
   /**
    * Ensure that the current writerSchema is compatible with the latest schema of this dataset.
    *
    * When inserting/updating data, we read records using the last used schema and convert them to the
    * GenericRecords with writerSchema. Hence, we need to ensure that this conversion can take place without errors.
    */
-  private void validateSchema() throws HoodieUpsertException, HoodieInsertException {
+  public void validateSchema() throws HoodieUpsertException, HoodieInsertException {
 
     boolean shouldValidate = config.shouldValidateAvroSchema();
     boolean allowProjection = config.shouldAllowAutoEvolutionColumnDrop();
@@ -944,17 +926,92 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
 
     try {
       TableSchemaResolver schemaResolver = new TableSchemaResolver(getMetaClient());
-      Option<Schema> existingTableSchema = schemaResolver.getTableAvroSchemaIfPresent(false);
-      if (!existingTableSchema.isPresent()) {
+      Option<HoodieSchema> existingTableSchemaOpt = schemaResolver.getTableSchemaIfPresent(false);
+      if (existingTableSchemaOpt.isEmpty()) {
         return;
       }
-      Schema writerSchema = HoodieAvroUtils.createHoodieWriteSchema(config.getSchema());
-      Schema tableSchema = HoodieAvroUtils.createHoodieWriteSchema(existingTableSchema.get());
-      AvroSchemaUtils.checkSchemaCompatible(tableSchema, writerSchema, shouldValidate, allowProjection, getDropPartitionColNames());
+
+      HoodieSchema writerSchema = HoodieSchemaUtils.createHoodieWriteSchema(config.getSchema(), false);
+      HoodieSchema tableSchema = HoodieSchemaUtils.addMetadataFields(existingTableSchemaOpt.get());
+      HoodieSchemaCompatibility.checkSchemaCompatible(tableSchema, writerSchema, shouldValidate, allowProjection, getDropPartitionColNames());
+      
+      // Check secondary index column compatibility
+      Option<HoodieIndexMetadata> indexMetadata = metaClient.getIndexMetadata();
+      if (indexMetadata.isPresent()) {
+        validateSecondaryIndexSchemaEvolution(tableSchema, writerSchema, indexMetadata.get());
+      }
     } catch (SchemaCompatibilityException e) {
       throw e;
     } catch (Exception e) {
       throw new SchemaCompatibilityException("Failed to read schema/check compatibility for base path " + metaClient.getBasePath(), e);
+    }
+  }
+
+  /**
+   * Validates that columns with secondary indexes are not evolved in an incompatible way.
+   *
+   * @param tableSchema the current table schema
+   * @param writerSchema the new writer schema
+   * @param indexMetadata the index metadata containing all index definitions
+   * @throws SchemaCompatibilityException if a secondary index column has incompatible evolution
+   */
+  static void validateSecondaryIndexSchemaEvolution(
+      HoodieSchema tableSchema,
+      HoodieSchema writerSchema,
+      HoodieIndexMetadata indexMetadata) throws SchemaCompatibilityException {
+    
+    // Filter for secondary index definitions
+    List<HoodieIndexDefinition> secondaryIndexDefs = indexMetadata.getIndexDefinitions().values().stream()
+        .filter(indexDef -> MetadataPartitionType.fromPartitionPath(indexDef.getIndexName()).equals(MetadataPartitionType.SECONDARY_INDEX))
+        .collect(Collectors.toList());
+    
+    if (secondaryIndexDefs.isEmpty()) {
+      return;
+    }
+    
+    // Create a map from source field to index name for efficient lookup
+    Map<String, String> columnToIndexName = new HashMap<>();
+    for (HoodieIndexDefinition indexDef : secondaryIndexDefs) {
+      String indexName = indexDef.getIndexName();
+      for (String sourceField : indexDef.getSourceFields()) {
+        // Note: If a column is part of multiple indexes, this will use the last one
+        // This is fine since we just need any index name for error reporting
+        columnToIndexName.put(sourceField, indexName);
+      }
+    }
+    
+    // Check each indexed column for schema evolution
+    for (Map.Entry<String, String> entry : columnToIndexName.entrySet()) {
+      String columnName = entry.getKey();
+      String indexName = entry.getValue();
+
+      Option<HoodieSchemaField> tableFieldOpt = tableSchema.getField(columnName);
+      
+      if (tableFieldOpt.isEmpty()) {
+        // This shouldn't happen as indexed columns should exist in table schema
+        log.warn("Secondary index '{}' references non-existent column: {}", indexName, columnName);
+        continue;
+      }
+
+      HoodieSchemaField tableField = tableFieldOpt.get();
+
+      // Use HoodieSchemaCompatibility's field lookup logic to handle aliases
+      HoodieSchemaField writerField = HoodieSchemaCompatibility.lookupWriterField(writerSchema, tableField);
+      
+      if (writerField != null && !tableField.schema().equals(writerField.schema())) {
+        // Check if this is just making the field nullable/non-nullable, which is safe from SI perspective
+        HoodieSchema nonNullTableField = tableField.schema().getNonNullType();
+        HoodieSchema nonNullWriterField = writerField.schema().getNonNullType();
+        if (nonNullTableField.equals(nonNullWriterField)) {
+          continue;
+        }
+        
+        String errorMessage = String.format(
+            "Column '%s' has secondary index '%s' and cannot evolve from schema '%s' to '%s'. "
+            + "Please drop the secondary index before changing the column type.",
+            columnName, indexName, tableField.schema(), writerField.schema());
+        throw new SchemaCompatibilityException(errorMessage);
+      }
     }
   }
 
@@ -1011,7 +1068,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @return instance of {@link HoodieTableMetadataWriter}
    */
   public final Option<HoodieTableMetadataWriter> getMetadataWriter(String triggeringInstantTimestamp) {
-    return getMetadataWriter(triggeringInstantTimestamp, false);
+    return getMetadataWriter(triggeringInstantTimestamp, false, true);
   }
 
   /**
@@ -1020,8 +1077,8 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param triggeringInstantTimestamp - The instant that is triggering this metadata write
    * @return instance of {@link HoodieTableMetadataWriter}
    */
-  public final Option<HoodieTableMetadataWriter> getMetadataWriter(String triggeringInstantTimestamp, boolean streamingWrites) {
-    return getMetadataWriter(triggeringInstantTimestamp, EAGER, streamingWrites);
+  public final Option<HoodieTableMetadataWriter> getMetadataWriter(String triggeringInstantTimestamp, boolean streamingWrites, boolean autoDetectAndDeleteMetadataPartitions) {
+    return getMetadataWriter(triggeringInstantTimestamp, EAGER, streamingWrites, autoDetectAndDeleteMetadataPartitions);
   }
 
   /**
@@ -1031,7 +1088,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @return An instance of {@link HoodieTableMetadataWriter}.
    */
   public Option<HoodieTableMetadataWriter> getIndexingMetadataWriter(String triggeringInstantTimestamp) {
-    return getMetadataWriter(triggeringInstantTimestamp, LAZY, false);
+    return getMetadataWriter(triggeringInstantTimestamp, LAZY, false, false);
   }
 
   /**
@@ -1047,12 +1104,14 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param triggeringInstantTimestamp The instant that is triggering this metadata write
    * @param failedWritesCleaningPolicy Cleaning policy on failed writes
    * @param streamingWrites            Whether streaming write is enabled
+   * @param autoDetectAndDeleteMetadataPartitions true when metadata partitions could be deleted based on incoming write config properties.
    * @return instance of {@link HoodieTableMetadataWriter}
    */
   protected Option<HoodieTableMetadataWriter> getMetadataWriter(
       String triggeringInstantTimestamp,
       HoodieFailedWritesCleaningPolicy failedWritesCleaningPolicy,
-      boolean streamingWrites) {
+      boolean streamingWrites,
+      boolean autoDetectAndDeleteMetadataPartitions) {
     // Each engine is expected to override this and
     // provide the actual metadata writer, if enabled.
     return Option.empty();
@@ -1064,7 +1123,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   public void maybeDeleteMetadataTable() {
     if (shouldExecuteMetadataTableDeletion()) {
       try {
-        LOG.info("Deleting metadata table because it is disabled in writer.");
+        log.info("Deleting metadata table because it is disabled in writer.");
         deleteMetadataTable(config.getBasePath(), context);
       } catch (HoodieMetadataException e) {
         throw new HoodieException("Failed to delete metadata table.", e);
@@ -1079,7 +1138,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     Stream.of(MetadataPartitionType.getValidValues()).forEach(partitionType -> {
       if (shouldDeleteMetadataPartition(partitionType)) {
         try {
-          LOG.info("Deleting metadata partition because it is disabled in writer: " + partitionType.name());
+          log.info("Deleting metadata partition because it is disabled in writer: " + partitionType.name());
           if (metadataPartitionExists(metaClient.getBasePath(), context, partitionType.getPartitionPath())) {
             deleteMetadataPartition(metaClient.getBasePath(), context, partitionType.getPartitionPath());
           }
@@ -1120,7 +1179,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
         metadataIndexDisabled = !config.isMetadataBloomFilterIndexEnabled();
         break;
       case RECORD_INDEX:
-        metadataIndexDisabled = !config.isRecordIndexEnabled();
+        metadataIndexDisabled = !config.isGlobalRecordLevelIndexEnabled() && !config.isRecordLevelIndexEnabled();
         break;
       // PARTITION_STATS should have same behavior as COLUMN_STATS
       case PARTITION_STATS:
@@ -1133,7 +1192,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
         metadataIndexDisabled = !partitionType.isMetadataPartitionAvailable(metaClient);
         break;
       default:
-        LOG.debug("Not a valid metadata partition type: {}", partitionType.name());
+        log.debug("Not a valid metadata partition type: {}", partitionType.name());
         return false;
     }
     return metadataIndexDisabled;
@@ -1155,7 +1214,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   private void clearMetadataTablePartitionsConfig(Option<MetadataPartitionType> partitionType, boolean clearAll) {
     Set<String> partitions = metaClient.getTableConfig().getMetadataPartitions();
     if (clearAll && partitions.size() > 0) {
-      LOG.info("Clear hoodie.table.metadata.partitions in hoodie.properties");
+      log.info("Clear hoodie.table.metadata.partitions in hoodie.properties");
       metaClient.getTableConfig().setValue(TABLE_METADATA_PARTITIONS.key(), EMPTY_STRING);
       HoodieTableConfig.update(metaClient.getStorage(), metaClient.getMetaPath(), metaClient.getTableConfig().getProps());
     } else if (partitionType.isPresent() && partitions.remove(partitionType.get().getPartitionPath())) {
@@ -1164,7 +1223,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     }
   }
 
-  public HoodieTableMetadata getMetadataTable() {
+  public HoodieTableMetadata getTableMetadata() {
     if (metadata == null) {
       metadata = refreshAndGetTableMetadata();
     }
@@ -1208,11 +1267,9 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     return new HashSet<>(Arrays.asList(partitionFields.get()));
   }
 
-  public void runMerge(HoodieMergeHandle<?, ?, ?, ?> upsertHandle, String instantTime, String fileId) throws IOException {
-    if (upsertHandle.getOldFilePath() == null) {
-      throw new HoodieUpsertException("Error in finding the old file path at commit " + instantTime + " for fileId: " + fileId);
-    } else {
-      HoodieMergeHelper.newInstance().runMerge(this, upsertHandle);
-    }
+  public ReaderContextFactory<T> getReaderContextFactoryForWrite() {
+    // question: should we just return null when context is serialized as null? the mismatch reader context would throw anyway.
+    return (ReaderContextFactory<T>) getContext().getReaderContextFactoryForWrite(metaClient, config.getRecordMerger().getRecordType(),
+        config.getProps());
   }
 }

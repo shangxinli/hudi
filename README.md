@@ -94,7 +94,7 @@ Learn more about Hudi at [https://hudi.apache.org](https://hudi.apache.org)
 Prerequisites for building Apache Hudi:
 
 * Unix-like system (like Linux, Mac OS X)
-* Java 8, 11 or 17
+* Java 11 or 17
 * Git
 * Maven (>=3.6.0)
 
@@ -134,6 +134,7 @@ Refer to the table below for building with different Spark and Scala versions.
 | `-Dspark3.4`              | hudi-spark3.4-bundle_2.12                    | For Spark 3.4.x and Scala 2.12                   |
 | `-Dspark3.5 -Dscala-2.12` | hudi-spark3.5-bundle_2.12                    | For Spark 3.5.x and Scala 2.12 (same as default) |
 | `-Dspark3.5 -Dscala-2.13` | hudi-spark3.5-bundle_2.13                    | For Spark 3.5.x and Scala 2.13                   |
+| `-Dspark4.0`              | hudi-spark4.0-bundle_2.13                    | For Spark 4.0 and Scala 2.13 (Needs java 17)     |
 | `-Dspark3`                | hudi-spark3-bundle_2.12 (legacy bundle name) | For Spark 3.5.x and Scala 2.12                   |
 
 Please note that only Spark-related bundles, i.e., `hudi-spark-bundle`, `hudi-utilities-bundle`,
@@ -167,17 +168,17 @@ Refer to the table below for building with different Flink and Scala versions.
 | Maven build options | Expected Flink bundle jar name | Notes                            |
 |:--------------------|:-------------------------------|:---------------------------------|
 | (empty)             | hudi-flink1.20-bundle          | For Flink 1.20 (default options) |
+| `-Dflink2.1`        | hudi-flink2.1-bundle           | For Flink 2.1                    |
+| `-Dflink2.0`        | hudi-flink2.0-bundle           | For Flink 2.0                    |
 | `-Dflink1.20`       | hudi-flink1.20-bundle          | For Flink 1.20 (same as default) |
 | `-Dflink1.19`       | hudi-flink1.19-bundle          | For Flink 1.19                   |
 | `-Dflink1.18`       | hudi-flink1.18-bundle          | For Flink 1.18                   |
 | `-Dflink1.17`       | hudi-flink1.17-bundle          | For Flink 1.17                   |
-| `-Dflink1.16`       | hudi-flink1.16-bundle          | For Flink 1.16                   |
-| `-Dflink1.15`       | hudi-flink1.15-bundle          | For Flink 1.15                   |
 
 For example,
 ```
-# Build against Flink 1.15.x
-mvn clean package -DskipTests -Dflink1.15
+# Build against Flink 1.17.x
+mvn clean package -DskipTests -Dflink1.17
 ```
 
 ## Running Tests

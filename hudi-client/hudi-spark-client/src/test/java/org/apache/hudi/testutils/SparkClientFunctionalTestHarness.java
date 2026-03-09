@@ -31,9 +31,10 @@ import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.model.SerializableIndexedRecord;
 import org.apache.hudi.common.model.WriteConcurrencyMode;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -63,7 +64,6 @@ import org.apache.hudi.testutils.providers.HoodieWriteClientProvider;
 import org.apache.hudi.testutils.providers.SparkProvider;
 import org.apache.hudi.timeline.service.TimelineService;
 
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -176,12 +176,16 @@ public class SparkClientFunctionalTestHarness implements SparkProvider, HoodieMe
     return getHoodieMetaClient(storageConf(), basePath(), tableType, props);
   }
 
-  public HoodieTableMetaClient getHoodieMetaClient(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType, Properties props) throws IOException {
-    return HoodieTableMetaClient.newTableBuilder()
-        .setTableName(RAW_TRIPS_TEST_NAME)
-        .setTableType(tableType)
-        .fromProperties(props)
-        .initTable(storageConf.newInstance(), basePath);
+  public HoodieTableMetaClient getHoodieMetaClient(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType, Properties props) {
+    try {
+      return HoodieTableMetaClient.newTableBuilder()
+          .setTableName(RAW_TRIPS_TEST_NAME)
+          .setTableType(tableType)
+          .fromProperties(props)
+          .initTable(storageConf.newInstance(), basePath);
+    } catch (IOException e) {
+      throw new HoodieIOException("Failed to create HoodieTableMetaClient for basePath: " + basePath, e);
+    }
   }
 
   public HoodieTableMetaClient getHoodieMetaClient(StorageConfiguration<?> storageConf, String basePath) throws IOException {
@@ -232,6 +236,7 @@ public class SparkClientFunctionalTestHarness implements SparkProvider, HoodieMe
           context, basePath(), incrementTimelineServicePortToUse());
       timelineServicePort = timelineService.getServerPort();
     }
+    spark.sparkContext().persistentRdds().foreach(rdd -> rdd._2.unpersist(false));
   }
 
   /**
@@ -241,7 +246,7 @@ public class SparkClientFunctionalTestHarness implements SparkProvider, HoodieMe
    * testcase may invoke this specifically to clean up in case of repeated test runs.
    */
   @AfterAll
-  public static synchronized void resetSpark() {
+  public static synchronized void resetSpark() throws IOException {
     if (spark != null) {
       spark.close();
       spark = null;
@@ -419,16 +424,9 @@ public class SparkClientFunctionalTestHarness implements SparkProvider, HoodieMe
             .build());
   }
 
-  protected Dataset<Row> toDataset(List<HoodieRecord> records, Schema schema) {
+  protected Dataset<Row> toDataset(List<HoodieRecord> records, HoodieSchema schema) {
     List<GenericRecord> avroRecords = records.stream()
-        .map(r -> {
-          HoodieRecordPayload payload = (HoodieRecordPayload) r.getData();
-          try {
-            return (GenericRecord) payload.getInsertValue(schema).get();
-          } catch (IOException e) {
-            throw new HoodieIOException("Failed to extract Avro payload", e);
-          }
-        })
+        .map(r -> (GenericRecord) ((SerializableIndexedRecord) r.getData()).getData())
         .collect(Collectors.toList());
     JavaRDD<GenericRecord> jrdd = jsc.parallelize(avroRecords, 2);
     return AvroConversionUtils.createDataFrame(jrdd.rdd(), schema.toString(), spark);

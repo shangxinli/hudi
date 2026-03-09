@@ -38,21 +38,19 @@ import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Slf4j
 public class CommonClientUtils {
-
-  private static final Logger LOG = LoggerFactory.getLogger(CommonClientUtils.class);
 
   public static void validateTableVersion(HoodieTableConfig tableConfig, HoodieWriteConfig writeConfig) {
     // mismatch of table versions.
-    if (!isValidTableVersionWriteVersionPair(tableConfig.getTableVersion(), writeConfig.getWriteVersion())) {
+    if (!areTableVersionsCompatible(tableConfig.getTableVersion(), writeConfig.getWriteVersion())) {
       // if table version is greater than 6, while writer version is 6, we can still allow it for upgrade
       throw new HoodieNotSupportedException(String.format("Table version (%s) and Writer version (%s) do not match for table at: %s.",
           tableConfig.getTableVersion(), writeConfig.getWriteVersion(), writeConfig.getBasePath()));
@@ -68,12 +66,23 @@ public class CommonClientUtils {
     }
   }
 
-  public static boolean isValidTableVersionWriteVersionPair(HoodieTableVersion tableVersion, HoodieTableVersion writeVersion) {
-    if (tableVersion.equals(writeVersion) || tableVersion.lesserThan(writeVersion)) {
+  public static boolean areTableVersionsCompatible(HoodieTableVersion tableVersion, HoodieTableVersion writeVersion) {
+    // Trivial case.
+    if (tableVersion.equals(writeVersion)) {
       return true;
     }
-    if (tableVersion.greaterThan(HoodieTableVersion.SIX) && tableVersion.lesserThan(HoodieTableVersion.NINE) && writeVersion.equals(HoodieTableVersion.SIX)) {
-      LOG.warn("Table version is greater than 6 and lower than 9, while writer version is 6. Allowing it for upgrade.");
+    // Upgrade is always allowed.
+    if (tableVersion.lesserThan(writeVersion)) {
+      return true;
+    }
+    // Downgrade requirements:
+    // 1. Table version > 6.
+    // 2. Writer version < table version.
+    // 3. Writer version >= 6.
+    if (tableVersion.greaterThan(HoodieTableVersion.SIX)
+        && writeVersion.versionCode() < tableVersion.versionCode()
+        && writeVersion.greaterThanOrEquals(HoodieTableVersion.SIX)) {
+      log.info("Table version is greater than 6, and writer version is lower than table version and must be >= 6.");
       return true;
     }
     return false;
@@ -99,6 +108,7 @@ public class CommonClientUtils {
     }
     HoodieFileFormat baseFileFormat = getBaseFileFormat(writeConfig, tableConfig);
     switch (getBaseFileFormat(writeConfig, tableConfig)) {
+      case LANCE:
       case PARQUET:
       case ORC:
         return HoodieLogBlock.HoodieLogBlockType.AVRO_DATA_BLOCK;
@@ -118,7 +128,7 @@ public class CommonClientUtils {
           taskContextSupplier.getAttemptIdSupplier().get()
       );
     } catch (Throwable t) {
-      LOG.warn("Error generating write token, using default.", t);
+      log.warn("Error generating write token, using default.", t);
       return HoodieLogFormat.DEFAULT_WRITE_TOKEN;
     }
   }

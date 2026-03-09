@@ -23,6 +23,9 @@ import org.apache.hudi.common.config.ConfigGroups;
 import org.apache.hudi.common.config.ConfigProperty;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.table.HoodieTableConfig;
+import org.apache.hudi.common.util.StringUtils;
+
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
 import java.io.FileReader;
@@ -35,6 +38,7 @@ import static org.apache.hudi.common.model.HoodiePayloadProps.PAYLOAD_ORDERING_F
 /**
  * Hoodie payload related configs.
  */
+@Slf4j
 @ConfigClassProperty(name = "Payload Configurations",
     groupName = ConfigGroups.Names.RECORD_PAYLOAD,
     description = "Payload related configs, that can be leveraged to "
@@ -43,14 +47,14 @@ public class HoodiePayloadConfig extends HoodieConfig {
 
   public static final ConfigProperty<String> EVENT_TIME_FIELD = ConfigProperty
       .key(PAYLOAD_EVENT_TIME_FIELD_PROP_KEY)
-      .defaultValue("ts")
+      .noDefaultValue()
       .markAdvanced()
       .withDocumentation("Table column/field name to derive timestamp associated with the records. This can"
           + "be useful for e.g, determining the freshness of the table.");
 
   public static final ConfigProperty<String> PAYLOAD_CLASS_NAME = ConfigProperty
       .key("hoodie.compaction.payload.class")
-      .defaultValue(HoodieTableConfig.DEFAULT_PAYLOAD_CLASS_NAME)
+      .defaultValue(HoodieTableConfig.getDefaultPayloadClassName())
       .markAdvanced()
       .withDocumentation("This needs to be same as class used during insert/upserts. Just like writing, compaction also uses "
         + "the record payload class to merge records in the log against each other, merge again with the base file and "
@@ -58,7 +62,7 @@ public class HoodiePayloadConfig extends HoodieConfig {
 
   /** @deprecated Use {@link HoodieWriteConfig#PRECOMBINE_FIELD_NAME} and its methods instead */
   @Deprecated
-  public static final ConfigProperty<String> ORDERING_FIELD = ConfigProperty
+  public static final ConfigProperty<String> ORDERING_FIELDS = ConfigProperty
       .key(PAYLOAD_ORDERING_FIELD_PROP_KEY)
       .noDefaultValue()
       .markAdvanced()
@@ -93,13 +97,23 @@ public class HoodiePayloadConfig extends HoodieConfig {
       return this;
     }
 
-    public Builder withPayloadOrderingField(String payloadOrderingField) {
-      payloadConfig.setValue(ORDERING_FIELD, String.valueOf(payloadOrderingField));
+    public Builder withPayloadOrderingFields(String payloadOrderingFields) {
+      if (StringUtils.nonEmpty(payloadOrderingFields)) {
+        payloadConfig.setValue(ORDERING_FIELDS, payloadOrderingFields);
+      } else {
+        log.warn("'{}' wasn't set during Hoodie payload building due to absent key field passed.",
+            ORDERING_FIELDS.key());
+      }
       return this;
     }
 
     public Builder withPayloadEventTimeField(String payloadEventTimeField) {
-      payloadConfig.setValue(EVENT_TIME_FIELD, String.valueOf(payloadEventTimeField));
+      if (StringUtils.nonEmpty(payloadEventTimeField)) {
+        payloadConfig.setValue(EVENT_TIME_FIELD, payloadEventTimeField);
+      } else {
+        log.warn("'{}' wasn't set during Hoodie payload building due to absent key field passed.",
+            EVENT_TIME_FIELD.key());
+      }
       return this;
     }
 

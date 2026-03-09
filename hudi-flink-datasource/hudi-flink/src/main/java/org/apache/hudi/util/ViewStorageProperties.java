@@ -26,11 +26,10 @@ import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.storage.StoragePath;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.configuration.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -43,8 +42,8 @@ import static org.apache.hudi.common.table.HoodieTableMetaClient.AUXILIARYFOLDER
 /**
  * Helper class to read/write {@link FileSystemViewStorageConfig}.
  */
+@Slf4j
 public class ViewStorageProperties {
-  private static final Logger LOG = LoggerFactory.getLogger(ViewStorageProperties.class);
 
   private static final String FILE_NAME = "view_storage_conf";
 
@@ -55,7 +54,7 @@ public class ViewStorageProperties {
       String basePath,
       FileSystemViewStorageConfig config,
       Configuration flinkConf) throws IOException {
-    Path propertyPath = getPropertiesFilePath(basePath, flinkConf.getString(FlinkOptions.WRITE_CLIENT_ID));
+    Path propertyPath = getPropertiesFilePath(basePath, flinkConf.get(FlinkOptions.WRITE_CLIENT_ID));
     FileSystem fs = HadoopFSUtils.getFs(basePath, HadoopConfigurations.getHadoopConf(flinkConf));
     fs.delete(propertyPath, false);
     try (OutputStream outputStream = fs.create(propertyPath)) {
@@ -68,8 +67,8 @@ public class ViewStorageProperties {
    * Read the {@link FileSystemViewStorageConfig} with given table base path.
    */
   public static FileSystemViewStorageConfig loadFromProperties(String basePath, Configuration conf) {
-    Path propertyPath = getPropertiesFilePath(basePath, conf.getString(FlinkOptions.WRITE_CLIENT_ID));
-    LOG.info("Loading filesystem view storage properties from " + propertyPath);
+    Path propertyPath = getPropertiesFilePath(basePath, conf.get(FlinkOptions.WRITE_CLIENT_ID));
+    log.info("Loading filesystem view storage properties from " + propertyPath);
     FileSystem fs = HadoopFSUtils.getFs(basePath, HadoopConfigurations.getHadoopConf(conf));
     Properties props = new Properties();
     try {

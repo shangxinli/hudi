@@ -26,25 +26,29 @@ import com.linkedin.common.urn.DataPlatformUrn;
 import com.linkedin.common.urn.DatasetUrn;
 import com.linkedin.common.urn.Urn;
 import io.datahubproject.models.util.DatabaseKey;
+import lombok.AccessLevel;
+import lombok.Getter;
 
 import java.util.Properties;
 
-import static org.apache.hudi.sync.common.HoodieSyncConfig.META_SYNC_DATABASE_NAME;
-import static org.apache.hudi.sync.common.HoodieSyncConfig.META_SYNC_TABLE_NAME;
+import static org.apache.hudi.sync.datahub.config.DataHubSyncConfig.META_SYNC_DATAHUB_DATABASE_NAME;
 import static org.apache.hudi.sync.datahub.config.DataHubSyncConfig.META_SYNC_DATAHUB_DATAPLATFORM_INSTANCE_NAME;
 import static org.apache.hudi.sync.datahub.config.DataHubSyncConfig.META_SYNC_DATAHUB_DATAPLATFORM_NAME;
 import static org.apache.hudi.sync.datahub.config.DataHubSyncConfig.META_SYNC_DATAHUB_DATASET_ENV;
+import static org.apache.hudi.sync.datahub.config.DataHubSyncConfig.META_SYNC_DATAHUB_TABLE_NAME;
 
 /**
  * Construct and provide the default {@link DatasetUrn} to identify the Dataset on DataHub.
  * <p>
  * Extend this to customize the way of constructing {@link DatasetUrn}.
  */
+@Getter
 public class HoodieDataHubDatasetIdentifier {
 
   public static final String DEFAULT_HOODIE_DATAHUB_PLATFORM_NAME = "hudi";
   public static final FabricType DEFAULT_DATAHUB_ENV = FabricType.DEV;
 
+  @Getter(AccessLevel.NONE)
   protected final Properties props;
   private final String dataPlatform;
   private final DataPlatformUrn dataPlatformUrn;
@@ -69,14 +73,13 @@ public class HoodieDataHubDatasetIdentifier {
         this.dataPlatformUrn,
         Option.ofNullable(config.getString(META_SYNC_DATAHUB_DATAPLATFORM_INSTANCE_NAME))
     );
+    this.databaseName = config.getStringOrDefault(META_SYNC_DATAHUB_DATABASE_NAME, META_SYNC_DATAHUB_DATABASE_NAME.getInferFunction().get().apply(config).get());
+    this.tableName = config.getStringOrDefault(META_SYNC_DATAHUB_TABLE_NAME, META_SYNC_DATAHUB_TABLE_NAME.getInferFunction().get().apply(config).get());
     this.datasetUrn = new DatasetUrn(
             this.dataPlatformUrn,
-            createDatasetName(this.dataPlatformInstance, config.getString(META_SYNC_DATABASE_NAME), config.getString(META_SYNC_TABLE_NAME)),
+            createDatasetName(this.dataPlatformInstance, this.databaseName, this.tableName),
             FabricType.valueOf(config.getStringOrDefault(META_SYNC_DATAHUB_DATASET_ENV))
     );
-
-    this.tableName = config.getString(META_SYNC_TABLE_NAME);
-    this.databaseName = config.getString(META_SYNC_DATABASE_NAME);
 
     // https://github.com/datahub-project/datahub/blob/0b105395e913cc47a59bdeed0c56d7c0d4b71b63/metadata-ingestion/src/datahub/emitter/mcp_builder.py#L69-L72
     DatabaseKey databaseKey = DatabaseKey.builder()
@@ -86,38 +89,6 @@ public class HoodieDataHubDatasetIdentifier {
             .build();
 
     this.databaseUrn = databaseKey.asUrn();
-  }
-
-  public DatasetUrn getDatasetUrn() {
-    return this.datasetUrn;
-  }
-
-  public String getDataPlatform() {
-    return this.dataPlatform;
-  }
-
-  public DataPlatformUrn getDataPlatformUrn() {
-    return this.dataPlatformUrn;
-  }
-
-  public Option<String> getDataPlatformInstance() {
-    return this.dataPlatformInstance;
-  }
-
-  public Option<Urn> getDataPlatformInstanceUrn() {
-    return this.dataPlatformInstanceUrn;
-  }
-
-  public Urn getDatabaseUrn() {
-    return this.databaseUrn;
-  }
-
-  public String getTableName() {
-    return this.tableName;
-  }
-
-  public String getDatabaseName() {
-    return this.databaseName;
   }
 
   private static DataPlatformUrn createDataPlatformUrn(String platformUrn) {

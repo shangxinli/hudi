@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.hudi.command.procedures
 
-import org.apache.hudi.{AvroConversionUtils, HoodieCLIUtils, HoodieFileIndex}
+import org.apache.hudi.{HoodieCLIUtils, HoodieFileIndex, HoodieSchemaConversionUtils}
 import org.apache.hudi.DataSourceReadOptions.{QUERY_TYPE, QUERY_TYPE_SNAPSHOT_OPT_VAL}
 import org.apache.hudi.client.SparkRDDWriteClient
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
@@ -59,7 +59,8 @@ class RunClusteringProcedure extends BaseProcedure
     ProcedureParameter.optional(7, "options", DataTypes.StringType),
     ProcedureParameter.optional(8, "instants", DataTypes.StringType),
     ProcedureParameter.optional(9, "selected_partitions", DataTypes.StringType),
-    ProcedureParameter.optional(10, "limit", DataTypes.IntegerType)
+    ProcedureParameter.optional(10, "partition_regex_pattern", DataTypes.StringType),
+    ProcedureParameter.optional(11, "limit", DataTypes.IntegerType)
   )
 
   private val OUTPUT_TYPE = new StructType(Array[StructField](
@@ -86,7 +87,8 @@ class RunClusteringProcedure extends BaseProcedure
     val options = getArgValueOrDefault(args, PARAMETERS(7))
     val specificInstants = getArgValueOrDefault(args, PARAMETERS(8))
     val parts = getArgValueOrDefault(args, PARAMETERS(9))
-    val limit = getArgValueOrDefault(args, PARAMETERS(10))
+    val partsReg = getArgValueOrDefault(args, PARAMETERS(10))
+    val limit = getArgValueOrDefault(args, PARAMETERS(11))
 
     val basePath: String = getBasePath(tableName, tablePath)
     val metaClient = createMetaClient(jsc, basePath)
@@ -100,6 +102,11 @@ class RunClusteringProcedure extends BaseProcedure
 
     if (selectedPartitions == null) {
       logInfo("No partition selected")
+      if (partsReg.isDefined) {
+        confs = confs ++ Map(
+          HoodieClusteringConfig.PARTITION_REGEX_PATTERN.key() -> partsReg.get.asInstanceOf[String]
+        )
+      }
     } else if (selectedPartitions.isEmpty) {
       logInfo("No partition matched")
       // scalastyle:off return
@@ -208,7 +215,7 @@ class RunClusteringProcedure extends BaseProcedure
 
     // Resolve partition predicates
     val schemaResolver = new TableSchemaResolver(metaClient)
-    val tableSchema = AvroConversionUtils.convertAvroSchemaToStructType(schemaResolver.getTableAvroSchema)
+    val tableSchema = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schemaResolver.getTableSchema)
     val condition = resolveExpr(sparkSession, predicate, tableSchema)
     val partitionColumns = metaClient.getTableConfig.getPartitionFields.orElse(Array[String]())
     val (partitionPredicates, dataPredicates) = splitPartitionAndDataPredicates(
@@ -226,7 +233,7 @@ class RunClusteringProcedure extends BaseProcedure
     }
 
     val tableSchemaResolver = new TableSchemaResolver(metaClient)
-    val fields = tableSchemaResolver.getTableAvroSchema(false)
+    val fields = tableSchemaResolver.getTableSchema(false)
       .getFields.asScala.map(_.name().toLowerCase)
     orderColumns.split(",").foreach(col => {
       if (!fields.contains(col.toLowerCase)) {

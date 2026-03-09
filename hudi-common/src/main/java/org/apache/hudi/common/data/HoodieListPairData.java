@@ -21,10 +21,12 @@ package org.apache.hudi.common.data;
 import org.apache.hudi.common.function.SerializableBiFunction;
 import org.apache.hudi.common.function.SerializableFunction;
 import org.apache.hudi.common.function.SerializablePairFunction;
+import org.apache.hudi.common.function.SerializablePairPredicate;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.MappingIterator;
 import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.exception.HoodieException;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -94,6 +96,11 @@ public class HoodieListPairData<K, V> extends HoodieBaseListData<Pair<K, V>> imp
   }
 
   @Override
+  public void unpersistWithDependencies() {
+    // no-op - in-memory implementation doesn't have dependencies to unpersist
+  }
+
+  @Override
   public HoodieData<K> keys() {
     return new HoodieListData<>(asStream().map(Pair::getKey), lazy);
   }
@@ -152,13 +159,13 @@ public class HoodieListPairData<K, V> extends HoodieBaseListData<Pair<K, V>> imp
   @Override
   public <W> HoodiePairData<K, W> mapValues(SerializableFunction<V, W> func) {
     Function<V, W> uncheckedMapper = throwingMapWrapper(func);
-    return new HoodieListPairData<>(asStream().map(p -> Pair.of(p.getKey(), uncheckedMapper.apply(p.getValue()))), lazy);
+    return new HoodieListPairData<K, W>(asStream().map(p -> Pair.of(p.getKey(), uncheckedMapper.apply(p.getValue()))), lazy);
   }
 
   @Override
   public <W> HoodiePairData<K, W> flatMapValues(SerializableFunction<V, Iterator<W>> func) {
     Function<V, Iterator<W>> uncheckedMapper = throwingMapWrapper(func);
-    return new HoodieListPairData<>(asStream().flatMap(p -> {
+    return new HoodieListPairData<K, W>(asStream().flatMap(p -> {
       Iterator<W> mappedValuesIterator = uncheckedMapper.apply(p.getValue());
       Iterator<Pair<K, W>> mappedPairsIterator =
           new MappingIterator<>(mappedValuesIterator, w -> Pair.of(p.getKey(), w));
@@ -207,6 +214,20 @@ public class HoodieListPairData<K, V> extends HoodieBaseListData<Pair<K, V>> imp
     ValidationUtils.checkArgument(other instanceof HoodieListPairData);
     Stream<Pair<K, V>> unionStream = Stream.concat(asStream(), ((HoodieListPairData<K, V>) other).asStream());
     return new HoodieListPairData<>(unionStream, lazy);
+  }
+
+  @Override
+  public HoodiePairData<K, V> filter(SerializablePairPredicate<K, V> filter) {
+    return new HoodieListPairData<>(
+        asStream().filter(p -> {
+          try {
+            return filter.call(p.getKey(), p.getValue());
+          } catch (Exception e) {
+            throw new HoodieException(e.getMessage(), e.getCause());
+          }
+        }),
+        lazy
+    );
   }
 
   @Override

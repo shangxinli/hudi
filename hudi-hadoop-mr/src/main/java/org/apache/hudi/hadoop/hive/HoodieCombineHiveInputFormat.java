@@ -35,10 +35,11 @@ import org.apache.hudi.internal.schema.utils.SerDeHelper;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
-import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hive.common.StringInternUtils;
@@ -392,7 +393,9 @@ public class HoodieCombineHiveInputFormat<K extends WritableComparable, V extend
       Arrays.stream(paths).forEach(path -> {
         final HoodieStorage storage;
         try {
-          storage = new HoodieHadoopStorage(path.getFileSystem(job));
+          FileSystem fs = path.getFileSystem(job);
+          storage = HoodieStorageUtils.getStorage(
+              HadoopFSUtils.convertToStoragePath(path), HadoopFSUtils.getStorageConf(fs.getConf()));
           Option<StoragePath> tablePath = TablePathUtils.getTablePath(storage, HadoopFSUtils.convertToStoragePath(path));
           if (tablePath.isPresent()) {
             uniqTablePaths.add(tablePath.get().toUri().toString());
@@ -406,10 +409,10 @@ public class HoodieCombineHiveInputFormat<K extends WritableComparable, V extend
         for (String path : uniqTablePaths) {
           HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setBasePath(path).setConf(new HadoopStorageConfiguration(job)).build();
           TableSchemaResolver schemaUtil = new TableSchemaResolver(metaClient);
-          String avroSchema = schemaUtil.getTableAvroSchema().toString();
+          String avroSchema = schemaUtil.getTableSchema().toString();
           Option<InternalSchema> internalSchema = schemaUtil.getTableInternalSchemaFromCommitMetadata();
           if (internalSchema.isPresent()) {
-            LOG.info("Set internal and avro schema cache with path: " + path);
+            LOG.info("Set internal and avro schema cache with path: {}", path);
             job.set(SCHEMA_CACHE_KEY_PREFIX + "." + path, avroSchema);
             job.set(INTERNAL_SCHEMA_CACHE_KEY_PREFIX + "." + path, SerDeHelper.toJson(internalSchema.get()));
           } else {
@@ -419,11 +422,11 @@ public class HoodieCombineHiveInputFormat<K extends WritableComparable, V extend
           }
         }
       } catch (Exception e) {
-        LOG.warn("Fail to set schema cache", e);
+        LOG.warn("Failed to set schema cache", e);
       }
     }
 
-    LOG.info("Number of all splits " + result.size());
+    LOG.info("Number of all splits {}", result.size());
     perfLogger.PerfLogEnd(CLASS_NAME, PerfLogger.GET_SPLITS);
     return result.toArray(new InputSplit[result.size()]);
   }

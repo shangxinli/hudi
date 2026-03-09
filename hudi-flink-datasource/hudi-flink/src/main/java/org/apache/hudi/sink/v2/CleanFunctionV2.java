@@ -18,11 +18,13 @@
 
 package org.apache.hudi.sink.v2;
 
+import org.apache.hudi.adapter.ProcessFunctionAdapter;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.sink.utils.NonThrownExecutor;
 import org.apache.hudi.util.FlinkWriteClients;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
@@ -31,8 +33,6 @@ import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Clean function that cleans the old commits.
@@ -44,9 +44,9 @@ import org.slf4j.LoggerFactory;
  * <p>Note: The difference with {@code CleanFunction} is {@code CleanFunctionV2} extends {@code ProcessFunction},
  * while {@code CleanFunction} is a {@code SinkFunction}.
  */
-public class CleanFunctionV2<T> extends ProcessFunction<T, RowData>
+@Slf4j
+public class CleanFunctionV2<T> extends ProcessFunctionAdapter<T, RowData>
     implements CheckpointedFunction, CheckpointListener {
-  private static final Logger LOG = LoggerFactory.getLogger(CleanFunctionV2.class);
 
   private final Configuration conf;
 
@@ -64,8 +64,8 @@ public class CleanFunctionV2<T> extends ProcessFunction<T, RowData>
   public void open(Configuration parameters) throws Exception {
     super.open(parameters);
     this.writeClient = FlinkWriteClients.createWriteClient(conf, getRuntimeContext());
-    this.executor = NonThrownExecutor.builder(LOG).waitForTasksFinish(true).build();
-    if (conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED)) {
+    this.executor = NonThrownExecutor.builder(log).waitForTasksFinish(true).build();
+    if (conf.get(FlinkOptions.CLEAN_ASYNC_ENABLED)) {
       executor.execute(() -> {
         this.isCleaning = true;
         try {
@@ -79,7 +79,7 @@ public class CleanFunctionV2<T> extends ProcessFunction<T, RowData>
 
   @Override
   public void notifyCheckpointComplete(long l) throws Exception {
-    if (conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED) && isCleaning) {
+    if (conf.get(FlinkOptions.CLEAN_ASYNC_ENABLED) && isCleaning) {
       executor.execute(() -> {
         try {
           this.writeClient.waitForCleaningFinish();
@@ -93,13 +93,13 @@ public class CleanFunctionV2<T> extends ProcessFunction<T, RowData>
 
   @Override
   public void snapshotState(FunctionSnapshotContext context) throws Exception {
-    if (conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED) && !isCleaning) {
+    if (conf.get(FlinkOptions.CLEAN_ASYNC_ENABLED) && !isCleaning) {
       try {
         this.writeClient.startAsyncCleaning();
         this.isCleaning = true;
       } catch (Throwable throwable) {
         // catch the exception to not affect the normal checkpointing
-        LOG.warn("Error while start async cleaning", throwable);
+        log.warn("Unable to start async cleaning", throwable);
       }
     }
   }

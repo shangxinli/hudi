@@ -22,6 +22,9 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.versioning.v2.ActiveTimelineV2;
 import org.apache.hudi.common.table.timeline.versioning.v2.InstantComparatorV2;
+import org.apache.hudi.common.util.collection.Pair;
+
+import lombok.NoArgsConstructor;
 
 import java.util.Collections;
 import java.util.List;
@@ -33,6 +36,7 @@ import java.util.stream.Stream;
 /**
  * An active timeline for test table format which merges timeline assuming test-format as the source of truth.
  */
+@NoArgsConstructor
 public class TestActiveTimeline extends ActiveTimelineV2 {
 
   public TestActiveTimeline(
@@ -54,24 +58,20 @@ public class TestActiveTimeline extends ActiveTimelineV2 {
         applyLayoutFilters);
   }
 
-  public TestActiveTimeline() {
-
-  }
-
   @Override
   protected List<HoodieInstant> getInstantsFromFileSystem(
       HoodieTableMetaClient metaClient,
       Set<String> includedExtensions,
       boolean applyLayoutFilters) {
-    Map<String, HoodieInstant> instantsInTestTableFormat = TestTableFormat.getRecordedInstants(metaClient.getBasePath().toString())
+    Map<Pair<String, String>, HoodieInstant> instantsInTestTableFormat = TestTableFormat.getRecordedInstants(metaClient.getBasePath().toString())
         .stream()
-        .collect(Collectors.toMap(HoodieInstant::requestedTime, instant -> instant));
+        .collect(Collectors.toMap(instant -> Pair.of(instant.requestedTime(), instant.getAction()), instant -> instant));
     List<HoodieInstant> instantsFromHoodieTimeline =
         super.getInstantsFromFileSystem(metaClient, includedExtensions, applyLayoutFilters);
     List<HoodieInstant> inflightInstantsInTestTableFormat =
         instantsFromHoodieTimeline.stream()
             .filter(
-                hoodieInstant -> !instantsInTestTableFormat.containsKey(hoodieInstant.requestedTime()))
+                hoodieInstant -> !instantsInTestTableFormat.containsKey(Pair.of(hoodieInstant.requestedTime(), hoodieInstant.getAction())))
             .map(
                 instant -> {
                   if (instant.isCompleted()) {

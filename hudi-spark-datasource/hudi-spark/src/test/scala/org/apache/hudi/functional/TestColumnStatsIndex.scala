@@ -18,15 +18,16 @@
 
 package org.apache.hudi.functional
 
-import org.apache.hudi.{ColumnStatsIndexSupport, DataSourceWriteOptions}
+import org.apache.hudi.{AvroConversionUtils, ColumnStatsIndexSupport, DataSourceReadOptions, DataSourceWriteOptions, HoodieSchemaConversionUtils}
 import org.apache.hudi.ColumnStatsIndexSupport.composeIndexSchema
-import org.apache.hudi.DataSourceWriteOptions.{PARTITIONPATH_FIELD, PRECOMBINE_FIELD, RECORDKEY_FIELD}
+import org.apache.hudi.DataSourceWriteOptions.{PARTITIONPATH_FIELD, RECORDKEY_FIELD}
 import org.apache.hudi.HoodieConversionUtils.toProperties
 import org.apache.hudi.avro.model.DecimalWrapper
 import org.apache.hudi.client.common.HoodieSparkEngineContext
 import org.apache.hudi.common.config.{HoodieCommonConfig, HoodieMetadataConfig, HoodieStorageConfig}
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.{HoodieRecord, HoodieTableType}
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, HoodieTableVersion}
 import org.apache.hudi.common.table.timeline.versioning.v1.InstantFileNameGeneratorV1
 import org.apache.hudi.common.table.view.FileSystemViewManager
@@ -35,6 +36,7 @@ import org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_FILE_NAME_GENERA
 import org.apache.hudi.common.util.{ParquetUtils, StringUtils}
 import org.apache.hudi.config.{HoodieCleanConfig, HoodieCompactionConfig, HoodieWriteConfig}
 import org.apache.hudi.functional.ColumnStatIndexTestBase.{ColumnStatsTestCase, ColumnStatsTestParams, WrapperCreator}
+import org.apache.hudi.metadata.HoodieIndexVersion
 import org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_COLUMN_STATS
 import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
@@ -48,9 +50,9 @@ import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, Great
 import org.apache.spark.sql.hudi.DataSkippingUtils.translateIntoColumnStatsIndexFilterExpr
 import org.apache.spark.sql.types._
 import org.junit.jupiter.api._
-import org.junit.jupiter.api.Assertions.{assertEquals, assertNotNull, assertTrue}
+import org.junit.jupiter.api.Assertions.{assertArrayEquals, assertEquals, assertNotNull, assertTrue}
 import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.{CsvSource, MethodSource}
+import org.junit.jupiter.params.provider.{Arguments, CsvSource, MethodSource}
 
 import java.math.{BigDecimal => JBigDecimal}
 import java.nio.ByteBuffer
@@ -63,127 +65,135 @@ import scala.collection.convert.ImplicitConversions.`collection AsScalaIterable`
 @Tag("functional-b")
 class TestColumnStatsIndex extends ColumnStatIndexTestBase {
 
+  protected def withRDDPersistenceValidation(f: => Unit): Unit = {
+    org.apache.hudi.testutils.SparkRDDValidationUtils.withRDDPersistenceValidation(spark, new org.apache.hudi.testutils.SparkRDDValidationUtils.ThrowingRunnable {
+      override def run(): Unit = f
+    })
+  }
+
   val DEFAULT_COLUMNS_TO_INDEX = Seq(HoodieRecord.COMMIT_TIME_METADATA_FIELD, HoodieRecord.RECORD_KEY_METADATA_FIELD,
     HoodieRecord.PARTITION_PATH_METADATA_FIELD, "c1","c2","c3","c4","c5","c6","c7","c8")
 
   @ParameterizedTest
   @MethodSource(Array("testMetadataColumnStatsIndexParams"))
   def testMetadataColumnStatsIndex(testCase: ColumnStatsTestCase): Unit = {
-    val metadataOpts = Map(
-      HoodieMetadataConfig.ENABLE.key -> "true",
-      HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true"
-    )
+    withRDDPersistenceValidation {
+      val metadataOpts = Map(
+        HoodieMetadataConfig.ENABLE.key -> "true",
+        HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true"
+      )
 
-    val commonOpts = Map(
-      "hoodie.insert.shuffle.parallelism" -> "4",
-      "hoodie.upsert.shuffle.parallelism" -> "4",
-      HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
-      DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
-      RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
-      HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
-      "hoodie.compact.inline.max.delta.commits" -> "10",
-      HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> testCase.tableVersion.toString
-    ) ++ metadataOpts
+      val commonOpts = Map(
+        "hoodie.insert.shuffle.parallelism" -> "4",
+        "hoodie.upsert.shuffle.parallelism" -> "4",
+        HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
+        DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
+        RECORDKEY_FIELD.key -> "c1",
+        HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
+        HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
+        "hoodie.compact.inline.max.delta.commits" -> "10",
+        HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> testCase.tableVersion.toString
+      ) ++ metadataOpts
 
-    // write empty first commit to validate edge cases
-    sparkSession.emptyDataFrame
-      .write
-      .format("hudi")
-      .options(commonOpts)
-      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
-      .mode(SaveMode.Overwrite)
-      .save(basePath)
+      // write empty first commit to validate edge cases
+      sparkSession.emptyDataFrame
+        .write
+        .format("hudi")
+        .options(commonOpts)
+        .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+        .mode(SaveMode.Overwrite)
+        .save(basePath)
 
-    doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts, commonOpts,
-      dataSourcePath = "index/colstats/input-table-json",
-      expectedColStatsSourcePath = "index/colstats/column-stats-index-table.json",
-      operation = DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL,
-      saveMode = SaveMode.Append))
+      doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts, commonOpts,
+        dataSourcePath = "index/colstats/input-table-json",
+        expectedColStatsSourcePath = "index/colstats/column-stats-index-table.json",
+        operation = DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL,
+        saveMode = SaveMode.Append))
 
-    doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts, commonOpts,
-      dataSourcePath = "index/colstats/another-input-table-json",
-      expectedColStatsSourcePath = "index/colstats/updated-column-stats-index-table.json",
-      operation = DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL,
-      saveMode = SaveMode.Append))
+      doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts, commonOpts,
+        dataSourcePath = "index/colstats/another-input-table-json",
+        expectedColStatsSourcePath = "index/colstats/updated-column-stats-index-table.json",
+        operation = DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL,
+        saveMode = SaveMode.Append))
 
-    // NOTE: MOR and COW have different fixtures since MOR is bearing delta-log files (holding
-    //       deferred updates), diverging from COW
-    var expectedColStatsSourcePath = if (testCase.tableType == HoodieTableType.COPY_ON_WRITE) {
-      "index/colstats/cow-updated2-column-stats-index-table.json"
-    } else {
-      "index/colstats/mor-updated2-column-stats-index-table.json"
+      // NOTE: MOR and COW have different fixtures since MOR is bearing delta-log files (holding
+      //       deferred updates), diverging from COW
+      var expectedColStatsSourcePath = if (testCase.tableType == HoodieTableType.COPY_ON_WRITE) {
+        "index/colstats/cow-updated2-column-stats-index-table.json"
+      } else {
+        "index/colstats/mor-updated2-column-stats-index-table.json"
+      }
+
+      doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts, commonOpts,
+        dataSourcePath = "index/colstats/update-input-table-json",
+        expectedColStatsSourcePath = expectedColStatsSourcePath,
+        operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+        saveMode = SaveMode.Append))
+
+      validateColumnsToIndex(metaClient, DEFAULT_COLUMNS_TO_INDEX)
+
+      // update list of columns to explicit list of cols.
+      val metadataOpts1 = Map(
+        HoodieMetadataConfig.ENABLE.key -> "true",
+        HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true",
+        HoodieMetadataConfig.COLUMN_STATS_INDEX_FOR_COLUMNS.key -> "c1,c2,c3,c5,c6,c7,c8" // ignore c4
+      )
+
+      expectedColStatsSourcePath = if (testCase.tableType == HoodieTableType.COPY_ON_WRITE) {
+        "index/colstats/cow-updated3-column-stats-index-table.json"
+      } else {
+        "index/colstats/mor-updated3-column-stats-index-table.json"
+      }
+
+      doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts1, commonOpts,
+        dataSourcePath = "index/colstats/update5-input-table-json",
+        expectedColStatsSourcePath = expectedColStatsSourcePath,
+        operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+        saveMode = SaveMode.Append))
+
+      validateColumnsToIndex(metaClient, Seq(HoodieRecord.COMMIT_TIME_METADATA_FIELD, HoodieRecord.RECORD_KEY_METADATA_FIELD,
+        HoodieRecord.PARTITION_PATH_METADATA_FIELD, "c1", "c2", "c3", "c5", "c6", "c7", "c8"))
+
+      // lets explicitly override again. ignore c6
+      // update list of columns to explicit list of cols.
+      val metadataOpts2 = Map(
+        HoodieMetadataConfig.ENABLE.key -> "true",
+        HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true",
+        HoodieMetadataConfig.COLUMN_STATS_INDEX_FOR_COLUMNS.key -> "c1,c2,c3,c5,c7,c8" // ignore c4,c6
+      )
+
+      expectedColStatsSourcePath = if (testCase.tableType == HoodieTableType.COPY_ON_WRITE) {
+        "index/colstats/cow-updated4-column-stats-index-table.json"
+      } else {
+        "index/colstats/mor-updated4-column-stats-index-table.json"
+      }
+
+      doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts2, commonOpts,
+        dataSourcePath = "index/colstats/update6-input-table-json",
+        expectedColStatsSourcePath = expectedColStatsSourcePath,
+        operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+        saveMode = SaveMode.Append))
+
+      validateColumnsToIndex(metaClient, Seq(HoodieRecord.COMMIT_TIME_METADATA_FIELD, HoodieRecord.RECORD_KEY_METADATA_FIELD,
+        HoodieRecord.PARTITION_PATH_METADATA_FIELD, "c1", "c2", "c3", "c5", "c7", "c8"))
+
+      // update list of columns to explicit list of cols.
+      val metadataOpts3 = Map(
+        HoodieMetadataConfig.ENABLE.key -> "true",
+        HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "false"
+      )
+      // disable col stats
+      doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts3, commonOpts,
+        dataSourcePath = "index/colstats/update6-input-table-json",
+        expectedColStatsSourcePath = expectedColStatsSourcePath,
+        operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+        saveMode = SaveMode.Append,
+        shouldValidateColStats = false,
+        shouldValidateManually = false))
+
+      metaClient = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build()
+      validateNonExistantColumnsToIndexDefn(metaClient)
     }
-
-    doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts, commonOpts,
-      dataSourcePath = "index/colstats/update-input-table-json",
-      expectedColStatsSourcePath = expectedColStatsSourcePath,
-      operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
-      saveMode = SaveMode.Append))
-
-    validateColumnsToIndex(metaClient, DEFAULT_COLUMNS_TO_INDEX)
-
-    // update list of columns to explicit list of cols.
-    val metadataOpts1 = Map(
-      HoodieMetadataConfig.ENABLE.key -> "true",
-      HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true",
-      HoodieMetadataConfig.COLUMN_STATS_INDEX_FOR_COLUMNS.key -> "c1,c2,c3,c5,c6,c7,c8" // ignore c4
-    )
-
-    expectedColStatsSourcePath = if (testCase.tableType == HoodieTableType.COPY_ON_WRITE) {
-      "index/colstats/cow-updated3-column-stats-index-table.json"
-    } else {
-      "index/colstats/mor-updated3-column-stats-index-table.json"
-    }
-
-    doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts1, commonOpts,
-      dataSourcePath = "index/colstats/update5-input-table-json",
-      expectedColStatsSourcePath = expectedColStatsSourcePath,
-      operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
-      saveMode = SaveMode.Append))
-
-    validateColumnsToIndex(metaClient, Seq(HoodieRecord.COMMIT_TIME_METADATA_FIELD, HoodieRecord.RECORD_KEY_METADATA_FIELD,
-      HoodieRecord.PARTITION_PATH_METADATA_FIELD, "c1","c2","c3","c5","c6","c7","c8"))
-
-    // lets explicitly override again. ignore c6
-    // update list of columns to explicit list of cols.
-    val metadataOpts2 = Map(
-      HoodieMetadataConfig.ENABLE.key -> "true",
-      HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true",
-      HoodieMetadataConfig.COLUMN_STATS_INDEX_FOR_COLUMNS.key -> "c1,c2,c3,c5,c7,c8" // ignore c4,c6
-    )
-
-    expectedColStatsSourcePath = if (testCase.tableType == HoodieTableType.COPY_ON_WRITE) {
-      "index/colstats/cow-updated4-column-stats-index-table.json"
-    } else {
-      "index/colstats/mor-updated4-column-stats-index-table.json"
-    }
-
-    doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts2, commonOpts,
-      dataSourcePath = "index/colstats/update6-input-table-json",
-      expectedColStatsSourcePath = expectedColStatsSourcePath,
-      operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
-      saveMode = SaveMode.Append))
-
-    validateColumnsToIndex(metaClient, Seq(HoodieRecord.COMMIT_TIME_METADATA_FIELD, HoodieRecord.RECORD_KEY_METADATA_FIELD,
-      HoodieRecord.PARTITION_PATH_METADATA_FIELD, "c1","c2","c3","c5","c7","c8"))
-
-    // update list of columns to explicit list of cols.
-    val metadataOpts3 = Map(
-      HoodieMetadataConfig.ENABLE.key -> "true",
-      HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "false"
-    )
-    // disable col stats
-    doWriteAndValidateColumnStats(ColumnStatsTestParams(testCase, metadataOpts3, commonOpts,
-      dataSourcePath = "index/colstats/update6-input-table-json",
-      expectedColStatsSourcePath = expectedColStatsSourcePath,
-      operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
-      saveMode = SaveMode.Append,
-      shouldValidateColStats = false,
-      shouldValidateManually = false))
-
-    metaClient = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build()
-    validateNonExistantColumnsToIndexDefn(metaClient)
   }
 
   /**
@@ -204,7 +214,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> testCase.tableVersion.toString
     ) ++ metadataOpts
@@ -249,6 +259,381 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       addNestedFiled = true)
   }
 
+  /**
+   * Tests data skipping with nested MAP and ARRAY fields in column stats index.
+   * This test verifies that queries can efficiently skip files based on nested field values
+   * within MAP and ARRAY types using the new Parquet-style accessor patterns.
+   */
+  @ParameterizedTest
+  @MethodSource(Array("testMetadataColumnStatsIndexParamsInMemory"))
+  def testMetadataColumnStatsIndexNestedMapArrayDataSkipping(testCase: ColumnStatsTestCase): Unit = {
+    // Define nested struct schema
+    val nestedSchema = new StructType()
+      .add("nested_int", IntegerType, false)
+      .add("level", StringType, true)
+
+    // Define full schema with MAP and ARRAY of nested structs
+    val testSchema = new StructType()
+      .add("record_key", StringType, false)
+      .add("partition_col", IntegerType, false)
+      .add("nullable_map_field", MapType(StringType, nestedSchema), true)
+      .add("array_field", ArrayType(nestedSchema), false)
+
+    val metadataOpts = Map(
+      HoodieMetadataConfig.ENABLE.key -> "true",
+      HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true",
+      HoodieMetadataConfig.COLUMN_STATS_INDEX_FOR_COLUMNS.key ->
+        "record_key,partition_col,nullable_map_field.key_value.value.nested_int,nullable_map_field.key_value.value.level,array_field.list.element.nested_int,array_field.list.element.level"
+    )
+
+    val commonOpts = Map(
+      "hoodie.insert.shuffle.parallelism" -> "1",
+      "hoodie.upsert.shuffle.parallelism" -> "1",
+      HoodieWriteConfig.TBL_NAME.key -> "hoodie_test_nested_skipping",
+      DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
+      RECORDKEY_FIELD.key -> "record_key",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "record_key",
+      PARTITIONPATH_FIELD.key -> "partition_col",
+      HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
+      HoodieStorageConfig.PARQUET_MAX_FILE_SIZE.key -> "10240",
+      HoodieCompactionConfig.PARQUET_SMALL_FILE_LIMIT.key -> "0",
+      HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> testCase.tableVersion.toString
+    ) ++ metadataOpts
+
+    // Batch 1 - Low Range Values (should be skipped when querying for nested_int > 200)
+    val batch1Data = Seq(
+      Row("key_001", 1,
+        Map("item1" -> Row(50, "low"), "item2" -> Row(75, "low")),
+        Array(Row(60, "low"), Row(80, "low"))),
+      Row("key_002", 1,
+        Map("item1" -> Row(30, "low"), "item2" -> Row(90, "low")),
+        Array(Row(40, "low"), Row(70, "low")))
+    )
+
+    // Batch 2 - High Range MAP and ARRAY (should be read when querying for nested_int > 200)
+    val batch2Data = Seq(
+      Row("key_003", 1,
+        Map("item1" -> Row(250, "high"), "item2" -> Row(275, "high")),
+        Array(Row(260, "high"), Row(280, "high"))),
+      Row("key_004", 1,
+        Map("item1" -> Row(230, "high"), "item2" -> Row(290, "high")),
+        Array(Row(240, "high"), Row(270, "high")))
+    )
+
+    // Batch 3 - Mixed Range (low MAP, high ARRAY)
+    val batch3Data = Seq(
+      Row("key_005", 2,
+        Map("item1" -> Row(50, "mixed"), "item2" -> Row(75, "mixed")),
+        Array(Row(260, "high"), Row(280, "high"))),
+      Row("key_006", 2,
+        Map("item1" -> Row(30, "mixed"), "item2" -> Row(90, "mixed")),
+        Array(Row(240, "high"), Row(270, "high")))
+    )
+
+    // Write Batch 1
+    val df1 = spark.createDataFrame(spark.sparkContext.parallelize(batch1Data), testSchema)
+    df1.write.format("hudi")
+      .options(commonOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+
+    // Write Batch 2
+    val df2 = spark.createDataFrame(spark.sparkContext.parallelize(batch2Data), testSchema)
+    df2.write.format("hudi")
+      .options(commonOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+    // Write Batch 3
+    val df3 = spark.createDataFrame(spark.sparkContext.parallelize(batch3Data), testSchema)
+    df3.write.format("hudi")
+      .options(commonOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+    metaClient = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build()
+
+    // Query options with data skipping enabled
+    val queryOpts = Map(
+      DataSourceReadOptions.ENABLE_DATA_SKIPPING.key -> "true"
+    ) ++ metadataOpts
+
+    // Query 1: Filter on MAP nested_int (high range)
+    val resultDf1 = spark.read.format("hudi")
+      .options(queryOpts)
+      .load(basePath)
+      .filter("EXISTS(map_values(nullable_map_field), v -> v.nested_int > 200)")
+
+    // Expected: 2 records from batch2 (key_003, key_004)
+    assertArrayEquals(
+      Array[Object]("key_003", "key_004"),
+      resultDf1.select("record_key").collect().map(_.getString(0)).sorted.asInstanceOf[Array[Object]]
+    )
+
+    // Query 2: Filter on ARRAY nested_int (high range)
+    val resultDf2 = spark.read.format("hudi")
+      .options(queryOpts)
+      .load(basePath)
+      .filter("EXISTS(array_field, elem -> elem.nested_int > 200)")
+
+    // Expected: 4 records from batch2 and batch3 (key_003, key_004, key_005, key_006)
+    assertArrayEquals(
+      Array[Object]("key_003", "key_004", "key_005", "key_006"),
+      resultDf2.select("record_key").collect().map(_.getString(0)).sorted.asInstanceOf[Array[Object]]
+    )
+
+    // Query 3: Filter on MAP level field (string)
+    val resultDf3 = spark.read.format("hudi")
+      .options(queryOpts)
+      .load(basePath)
+      .filter("EXISTS(map_values(nullable_map_field), v -> v.level = 'high')")
+
+    // Expected: 2 records from batch2
+    assertArrayEquals(
+      Array[Object]("key_003", "key_004"),
+      resultDf3.select("record_key").collect().map(_.getString(0)).sorted.asInstanceOf[Array[Object]]
+    )
+
+    // Query 4: Combined filter (both MAP and ARRAY conditions)
+    val resultDf4 = spark.read.format("hudi")
+      .options(queryOpts)
+      .load(basePath)
+      .filter("EXISTS(map_values(nullable_map_field), v -> v.nested_int > 200) " +
+        "AND EXISTS(array_field, elem -> elem.nested_int > 200)")
+
+    // Expected: 2 records from batch2 only (both MAP and ARRAY have high values)
+    assertArrayEquals(
+      Array[Object]("key_003", "key_004"),
+      resultDf4.select("record_key").collect().map(_.getString(0)).sorted.asInstanceOf[Array[Object]]
+    )
+
+    // Validate column stats were created for nested fields
+    val metadataConfig = HoodieMetadataConfig.newBuilder()
+      .fromProperties(toProperties(metadataOpts))
+      .build()
+
+    val hoodieSchema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(testSchema, "record", "")
+    val columnStatsIndex = new ColumnStatsIndexSupport(
+      spark,
+      testSchema,
+      hoodieSchema,
+      metadataConfig,
+      metaClient
+    )
+
+    val indexedColumns = Seq(
+      "nullable_map_field.key_value.value.nested_int",
+      "array_field.list.element.nested_int"
+    )
+
+    columnStatsIndex.loadTransposed(indexedColumns, testCase.shouldReadInMemory) { transposedDF =>
+      // Verify we have stats for all 3 file groups (may have more files for MOR due to updates)
+      val fileCount = transposedDF.select("fileName").distinct().count()
+      assertTrue(fileCount >= 3, s"Expected at least 3 files with column stats, got $fileCount")
+
+      // Verify min/max ranges for MAP field
+      val mapStats = transposedDF.select(
+        "`nullable_map_field.key_value.value.nested_int_minValue`",
+        "`nullable_map_field.key_value.value.nested_int_maxValue`"
+      ).collect().map(row => (row.getInt(0), row.getInt(1))).sorted
+
+      // Expected stats: Batch1[30,90], Batch2[230,290], Batch3[30,90]
+      // We should have exactly one file with [230,290] (high range) and at least two with [30,90] (low range)
+      val mapHighRangeCount = mapStats.count(stat => stat._1 == 230 && stat._2 == 290)
+      val mapLowRangeCount = mapStats.count(stat => stat._1 == 30 && stat._2 == 90)
+      assertEquals(1, mapHighRangeCount, "Expected exactly 1 file with MAP range [230,290]")
+      assertTrue(mapLowRangeCount >= 2, s"Expected at least 2 files with MAP range [30,90], got $mapLowRangeCount")
+
+      // Verify min/max ranges for ARRAY field
+      val arrayStats = transposedDF.select(
+        "`array_field.list.element.nested_int_minValue`",
+        "`array_field.list.element.nested_int_maxValue`"
+      ).collect().map(row => (row.getInt(0), row.getInt(1))).sorted
+
+      // Expected stats: Batch1[40,80], Batch2[260,280], Batch3[240,280]
+      // We should have exactly one file with [40,80] (low range) and at least two with high ranges
+      val arrayLowRangeCount = arrayStats.count(stat => stat._1 == 40 && stat._2 == 80)
+      val arrayHighRangeCount = arrayStats.count(stat => stat._1 >= 240 && stat._2 == 280)
+      assertEquals(1, arrayLowRangeCount, "Expected exactly 1 file with ARRAY range [40,80]")
+      assertTrue(arrayHighRangeCount >= 2, s"Expected at least 2 files with ARRAY high ranges, got $arrayHighRangeCount")
+    }
+    // Validate that indexed columns are registered correctly
+    validateColumnsToIndex(metaClient, Seq(
+      HoodieRecord.COMMIT_TIME_METADATA_FIELD,
+      HoodieRecord.RECORD_KEY_METADATA_FIELD,
+      HoodieRecord.PARTITION_PATH_METADATA_FIELD,
+      "record_key",
+      "partition_col",
+      "nullable_map_field.key_value.value.nested_int",
+      "nullable_map_field.key_value.value.level",
+      "array_field.list.element.nested_int",
+      "array_field.list.element.level"
+    ))
+  }
+
+  /**
+   * Tests column stats index with multi-level nested ARRAY fields (2 and 3 levels deep).
+   * This verifies that the .list.element pattern works correctly for deeply nested arrays.
+   */
+  @ParameterizedTest
+  @MethodSource(Array("testMetadataColumnStatsIndexParamsInMemory"))
+  def testMetadataColumnStatsIndexMultiLevelNestedArrays(testCase: ColumnStatsTestCase): Unit = {
+    // Define nested struct for innermost level
+    val innerStruct = new StructType()
+      .add("value", IntegerType, false)
+
+    // Define schema with 2-level and 3-level nested arrays
+    val testSchema = new StructType()
+      .add("record_key", StringType, false)
+      .add("partition_col", IntegerType, false)
+      // 2-level: Array of Array of Int
+      .add("level2_array", ArrayType(ArrayType(IntegerType)), false)
+      // 3-level: Array of Array of Array of Int
+      .add("level3_array", ArrayType(ArrayType(ArrayType(IntegerType))), false)
+      // 2-level array of struct: Array of Array of Struct
+      .add("level2_array_struct", ArrayType(ArrayType(innerStruct)), false)
+
+    val metadataOpts = Map(
+      HoodieMetadataConfig.ENABLE.key -> "true",
+      HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key -> "true",
+      HoodieMetadataConfig.COLUMN_STATS_INDEX_FOR_COLUMNS.key ->
+        ("record_key,partition_col," +
+          "level2_array.list.element.list.element," +
+          "level3_array.list.element.list.element.list.element," +
+          "level2_array_struct.list.element.list.element.value")
+    )
+
+    val commonOpts = Map(
+      "hoodie.insert.shuffle.parallelism" -> "1",
+      "hoodie.upsert.shuffle.parallelism" -> "1",
+      HoodieWriteConfig.TBL_NAME.key -> "hoodie_test_multi_level_arrays",
+      DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
+      RECORDKEY_FIELD.key -> "record_key",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "record_key",
+      PARTITIONPATH_FIELD.key -> "partition_col",
+      HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
+      HoodieStorageConfig.PARQUET_MAX_FILE_SIZE.key -> "10240",
+      HoodieCompactionConfig.PARQUET_SMALL_FILE_LIMIT.key -> "0",
+      HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> testCase.tableVersion.toString
+    ) ++ metadataOpts
+
+    // Batch 1 - Low range values
+    val batch1Data = Seq(
+      Row("key_001", 1,
+        Array(Array(10, 20), Array(30, 40)),           // level2_array: min=10, max=40
+        Array(Array(Array(5, 10), Array(15, 20))),    // level3_array: min=5, max=20
+        Array(Array(Row(100), Row(150)))),            // level2_array_struct.value: min=100, max=150
+      Row("key_002", 1,
+        Array(Array(15, 25), Array(35, 45)),           // level2_array: min=15, max=45
+        Array(Array(Array(8, 12), Array(18, 22))),    // level3_array: min=8, max=22
+        Array(Array(Row(110), Row(160))))             // level2_array_struct.value: min=110, max=160
+    )
+
+    // Batch 2 - High range values
+    val batch2Data = Seq(
+      Row("key_003", 1,
+        Array(Array(500, 600), Array(700, 800)),       // level2_array: min=500, max=800
+        Array(Array(Array(300, 350), Array(400, 450))), // level3_array: min=300, max=450
+        Array(Array(Row(1000), Row(1500)))),          // level2_array_struct.value: min=1000, max=1500
+      Row("key_004", 1,
+        Array(Array(550, 650), Array(750, 850)),       // level2_array: min=550, max=850
+        Array(Array(Array(320, 370), Array(420, 470))), // level3_array: min=320, max=470
+        Array(Array(Row(1100), Row(1600))))           // level2_array_struct.value: min=1100, max=1600
+    )
+
+    // Write Batch 1
+    val df1 = spark.createDataFrame(spark.sparkContext.parallelize(batch1Data), testSchema)
+    df1.write.format("hudi")
+      .options(commonOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+
+    // Write Batch 2
+    val df2 = spark.createDataFrame(spark.sparkContext.parallelize(batch2Data), testSchema)
+    df2.write.format("hudi")
+      .options(commonOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+    metaClient = HoodieTableMetaClient.builder().setBasePath(basePath).setConf(storageConf).build()
+
+    // Validate column stats were created for multi-level nested fields
+    val metadataConfig = HoodieMetadataConfig.newBuilder()
+      .fromProperties(toProperties(metadataOpts))
+      .build()
+
+    val hoodieSchema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(testSchema, "record", "")
+    val columnStatsIndex = new ColumnStatsIndexSupport(
+      spark,
+      testSchema,
+      hoodieSchema,
+      metadataConfig,
+      metaClient
+    )
+
+    val indexedColumns = Seq(
+      "level2_array.list.element.list.element",
+      "level3_array.list.element.list.element.list.element",
+      "level2_array_struct.list.element.list.element.value"
+    )
+
+    columnStatsIndex.loadTransposed(indexedColumns, testCase.shouldReadInMemory) { transposedDF =>
+      // Verify we have stats for both file groups
+      val fileCount = transposedDF.select("fileName").distinct().count()
+      assertTrue(fileCount >= 2, s"Expected at least 2 files with column stats, got $fileCount")
+
+      // Verify 2-level array stats
+      val level2Stats = transposedDF.select(
+        "`level2_array.list.element.list.element_minValue`",
+        "`level2_array.list.element.list.element_maxValue`"
+      ).collect().map(row => (row.getInt(0), row.getInt(1))).sorted
+
+      val level2LowCount = level2Stats.count(stat => stat._1 >= 10 && stat._2 <= 50)
+      val level2HighCount = level2Stats.count(stat => stat._1 >= 500 && stat._2 >= 800)
+      assertTrue(level2LowCount >= 1, s"Expected at least 1 file with level2 low range, got $level2LowCount")
+      assertTrue(level2HighCount >= 1, s"Expected at least 1 file with level2 high range, got $level2HighCount")
+
+      // Verify 3-level array stats
+      val level3Stats = transposedDF.select(
+        "`level3_array.list.element.list.element.list.element_minValue`",
+        "`level3_array.list.element.list.element.list.element_maxValue`"
+      ).collect().map(row => (row.getInt(0), row.getInt(1))).sorted
+
+      val level3LowCount = level3Stats.count(stat => stat._1 >= 5 && stat._2 <= 25)
+      val level3HighCount = level3Stats.count(stat => stat._1 >= 300 && stat._2 >= 450)
+      assertTrue(level3LowCount >= 1, s"Expected at least 1 file with level3 low range, got $level3LowCount")
+      assertTrue(level3HighCount >= 1, s"Expected at least 1 file with level3 high range, got $level3HighCount")
+
+      // Verify 2-level array of struct stats
+      val level2StructStats = transposedDF.select(
+        "`level2_array_struct.list.element.list.element.value_minValue`",
+        "`level2_array_struct.list.element.list.element.value_maxValue`"
+      ).collect().map(row => (row.getInt(0), row.getInt(1))).sorted
+
+      val structLowCount = level2StructStats.count(stat => stat._1 >= 100 && stat._2 <= 200)
+      val structHighCount = level2StructStats.count(stat => stat._1 >= 1000 && stat._2 >= 1500)
+      assertTrue(structLowCount >= 1, s"Expected at least 1 file with struct low range, got $structLowCount")
+      assertTrue(structHighCount >= 1, s"Expected at least 1 file with struct high range, got $structHighCount")
+    }
+
+    // Validate that indexed columns are registered correctly
+    validateColumnsToIndex(metaClient, Seq(
+      HoodieRecord.COMMIT_TIME_METADATA_FIELD,
+      HoodieRecord.RECORD_KEY_METADATA_FIELD,
+      HoodieRecord.PARTITION_PATH_METADATA_FIELD,
+      "record_key",
+      "partition_col",
+      "level2_array.list.element.list.element",
+      "level3_array.list.element.list.element.list.element",
+      "level2_array_struct.list.element.list.element.value"
+    ))
+  }
+
   @ParameterizedTest
   @MethodSource(Array("testTableTypePartitionTypeParams"))
   def testMetadataColumnStatsIndexInitializationWithUpserts(tableType: HoodieTableType, partitionCol : String, tableVersion: Int): Unit = {
@@ -264,7 +649,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       PARTITIONPATH_FIELD.key -> partitionCol,
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieCompactionConfig.INLINE_COMPACT_NUM_DELTA_COMMITS.key -> "5",
@@ -278,7 +663,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Overwrite,
       false,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -289,7 +674,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append,
       false,
-        numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -300,7 +685,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.DELETE_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append,
       false,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -330,7 +715,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       val allPartitionPaths = fsv.getPartitionPaths
       allPartitionPaths.forEach(partitionPath => {
         val pPath = FSUtils.getRelativePartitionPath(baseStoragePath, partitionPath)
-        assertTrue (fsv.getLatestFileSlices(pPath).filter(fileSlice => fileSlice.hasLogFiles).count() > 0)
+        assertTrue(fsv.getLatestFileSlices(pPath).filter(fileSlice => fileSlice.hasLogFiles).count() > 0)
       })
       fsv.close()
     }
@@ -342,7 +727,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append,
       latestCompletedCommit = latestCompletedCommit,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -359,7 +744,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append,
       latestCompletedCommit = latestCompletedCommit,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -381,7 +766,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       PARTITIONPATH_FIELD.key() -> partitionCol,
       "hoodie.write.markers.type" -> "DIRECT",
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
@@ -395,7 +780,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Overwrite,
       shouldValidateColStats = false,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -406,7 +791,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append,
       shouldValidateColStats = false,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -436,7 +821,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       operation = DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append,
       latestCompletedCommit = latestCompletedCommit,
-      numPartitions =  1,
+      numPartitions = 1,
       parquetMaxFileSize = 100 * 1024 * 1024,
       smallFileLimit = 0))
 
@@ -496,7 +881,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
   }
 
   @ParameterizedTest
-  @CsvSource(value = Array("6", "8"))
+  @MethodSource(Array("testMORDeleteBlocksParams"))
   def testMORDeleteBlocks(tableVersion: Int): Unit = {
     val tableType: HoodieTableType = HoodieTableType.MERGE_ON_READ
     val partitionCol = "c8"
@@ -512,7 +897,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       PARTITIONPATH_FIELD.key() -> partitionCol,
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieCompactionConfig.INLINE_COMPACT_NUM_DELTA_COMMITS.key() -> "5",
@@ -569,7 +954,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       PARTITIONPATH_FIELD.key() -> partitionCol,
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieCleanConfig.CLEANER_COMMITS_RETAINED.key() -> "1",
@@ -635,7 +1020,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> testCase.tableType.toString,
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       PARTITIONPATH_FIELD.key() -> partitionCol,
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieCleanConfig.CLEANER_COMMITS_RETAINED.key() -> "1",
@@ -704,15 +1089,16 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       DataSourceWriteOptions.TABLE_TYPE.key -> tableType.name(),
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> tableVersion.toString
     ) ++ metadataOpts
 
-    val schema = StructType(StructField("c1", IntegerType, false) :: StructField("c2", StringType, true) :: Nil)
+    val structSchema = StructType(StructField("c1", IntegerType, false) :: StructField("c2", StringType, true) :: Nil)
+    val schema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(structSchema, "record", "")
     val inputDF = spark.createDataFrame(
       spark.sparkContext.parallelize(Seq(Row(1, "v1"), Row(2, "v2"), Row(3, null), Row(4, "v4"))),
-      schema)
+      structSchema)
 
     inputDF
       .sort("c1", "c2")
@@ -729,7 +1115,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       .fromProperties(toProperties(metadataOpts))
       .build()
 
-    val columnStatsIndex = new ColumnStatsIndexSupport(spark, schema, metadataConfig, metaClient)
+    val columnStatsIndex = new ColumnStatsIndexSupport(spark, structSchema, schema, metadataConfig, metaClient)
     columnStatsIndex.loadTransposed(Seq("c2"), false) { transposedDF =>
       val result = transposedDF.select("valueCount", "c2_nullCount")
         .collect().head
@@ -755,7 +1141,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       "hoodie.upsert.shuffle.parallelism" -> "4",
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       PARTITIONPATH_FIELD.key() -> "c8",
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieCommonConfig.RECONCILE_SCHEMA.key -> "true",
@@ -797,7 +1183,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
     )
     fsv.close()
 
-    val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, metadataConfig, metaClient)
+    val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, sourceTableHoodieSchema, metadataConfig, metaClient)
     val requestedColumns = Seq("c1")
     // get all file names
     val stringEncoder: Encoder[String] = org.apache.spark.sql.Encoders.STRING
@@ -852,7 +1238,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       "hoodie.upsert.shuffle.parallelism" -> "4",
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieCommonConfig.RECONCILE_SCHEMA.key -> "true",
       HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> tableVersion.toString
@@ -890,7 +1276,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       // These are NOT indexed
       val requestedColumns = Seq("c4")
 
-      val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, metadataConfig, metaClient)
+      val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, sourceTableHoodieSchema, metadataConfig, metaClient)
 
       columnStatsIndex.loadTransposed(requestedColumns, shouldReadInMemory) { emptyTransposedColStatsDF =>
         assertEquals(0, emptyTransposedColStatsDF.collect().length)
@@ -938,7 +1324,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       val manualUpdatedColStatsTableDF =
         buildColumnStatsTableManually(basePath, requestedColumns, targetColumnsToIndex, expectedColStatsSchema, sourceTableSchema)
 
-      val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, metadataConfig, metaClient)
+      val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, sourceTableHoodieSchema, metadataConfig, metaClient)
 
       // Nevertheless, the last update was written with a new schema (that is a subset of the original table schema),
       // we should be able to read CSI, which will be properly padded (with nulls) after transposition
@@ -967,7 +1353,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
       "hoodie.upsert.shuffle.parallelism" -> "4",
       HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
       RECORDKEY_FIELD.key -> "c1",
-      PRECOMBINE_FIELD.key -> "c1",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "c1",
       HoodieTableConfig.POPULATE_META_FIELDS.key -> "true",
       HoodieWriteConfig.WRITE_TABLE_VERSION.key() -> tableVersion.toString
     ) ++ metadataOpts
@@ -1002,7 +1388,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
 
     // We have to include "c1", since we sort the expected outputs by this column
     val requestedColumns = Seq("c4", "c1")
-    val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, metadataConfig, metaClient)
+    val columnStatsIndex = new ColumnStatsIndexSupport(spark, sourceTableSchema, sourceTableHoodieSchema, metadataConfig, metaClient)
 
     ////////////////////////////////////////////////////////////////////////
     // Query filter #1: c1 > 1 and c4 > 'c4 filed value'
@@ -1065,7 +1451,7 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
     val parquetFilePath = new StoragePath(
       fs.listStatus(path).filter(fs => fs.getPath.getName.endsWith(".parquet")).toSeq.head.getPath.toUri)
 
-    val ranges = utils.readColumnStatsFromMetadata(storage, parquetFilePath, Seq("c1", "c2", "c3a", "c3b", "c3c", "c4", "c5", "c6", "c7", "c8").asJava)
+    val ranges = utils.readColumnStatsFromMetadata(storage, parquetFilePath, Seq("c1", "c2", "c3a", "c3b", "c3c", "c4", "c5", "c6", "c7", "c8").asJava, HoodieIndexVersion.V1)
 
     ranges.asScala.foreach(r => {
       // NOTE: Unfortunately Parquet can't compute statistics for Timestamp column, hence we
@@ -1103,5 +1489,17 @@ class TestColumnStatsIndex extends ColumnStatIndexTestBase {
     assertTrue(deserialized.isInstanceOf[JBigDecimal], "Deserialized value should be a java.math.BigDecimal")
     assertEquals(expected, deserialized.asInstanceOf[JBigDecimal],
       s"Decimal value from $description does not match")
+  }
+}
+
+object TestColumnStatsIndex {
+  def testMORDeleteBlocksParams: java.util.stream.Stream[Arguments] = {
+    val currentVersionCode = HoodieTableVersion.current().versionCode().toString
+    java.util.stream.Stream.of(Seq(
+      Arguments.arguments("6"),
+      Arguments.arguments("8"),
+      Arguments.arguments(currentVersionCode)
+    )
+      : _*)
   }
 }

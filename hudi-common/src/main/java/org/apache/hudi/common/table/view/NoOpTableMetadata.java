@@ -21,6 +21,9 @@ package org.apache.hudi.common.table.view;
 import org.apache.hudi.avro.model.HoodieMetadataColumnStats;
 import org.apache.hudi.common.bloom.BloomFilter;
 import org.apache.hudi.common.data.HoodieData;
+import org.apache.hudi.common.data.HoodieListPairData;
+import org.apache.hudi.common.data.HoodiePairData;
+import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
 import org.apache.hudi.common.util.Option;
@@ -31,7 +34,9 @@ import org.apache.hudi.internal.schema.Types;
 import org.apache.hudi.metadata.HoodieMetadataPayload;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.MetadataPartitionType;
+import org.apache.hudi.metadata.RawKey;
 import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.StoragePathFilter;
 import org.apache.hudi.storage.StoragePathInfo;
 
 import java.io.IOException;
@@ -72,6 +77,11 @@ class NoOpTableMetadata implements HoodieTableMetadata {
   }
 
   @Override
+  public Map<String, List<StoragePathInfo>> getAllFilesInPartitions(Collection<String> partitionPaths, Option<StoragePathFilter> pathFilterOption) throws IOException {
+    throw new HoodieMetadataException("Unsupported operation: getAllFilesInPartitions!");
+  }
+
+  @Override
   public Option<BloomFilter> getBloomFilter(String partitionName, String fileName) throws HoodieMetadataException {
     throw new HoodieMetadataException("Unsupported operation: getBloomFilter!");
   }
@@ -102,17 +112,25 @@ class NoOpTableMetadata implements HoodieTableMetadata {
   }
 
   @Override
-  public Map<String, HoodieRecordGlobalLocation> readRecordIndex(List<String> recordKeys) {
+  public HoodiePairData<String, HoodieRecordGlobalLocation> readRecordIndexLocationsWithKeys(HoodieData<String> recordKeys) {
     throw new HoodieMetadataException("Unsupported operation: readRecordIndex!");
   }
 
   @Override
-  public Map<String, HoodieRecordGlobalLocation> readSecondaryIndex(List<String> secondaryKeys, String partitionName) {
-    return Collections.emptyMap();
+  public HoodiePairData<String, HoodieRecordGlobalLocation> readRecordIndexLocationsWithKeys(HoodieData<String> recordKeys, Option<String> dataTablePartition) {
+    throw new HoodieMetadataException("Unsupported operation: readRecordIndex!");
   }
 
   @Override
-  public HoodieData<HoodieRecord<HoodieMetadataPayload>> getRecordsByKeyPrefixes(List<String> keyPrefixes, String partitionName, boolean shouldLoadInMemory) {
+  public HoodiePairData<String, HoodieRecordGlobalLocation> readSecondaryIndexLocationsWithKeys(HoodieData<String> secondaryKeys, String partitionName) {
+    return HoodieListPairData.eager(Collections.emptyMap());
+  }
+
+  @Override
+  public HoodieData<HoodieRecord<HoodieMetadataPayload>> getRecordsByKeyPrefixes(
+      HoodieData<? extends RawKey> rawKeys,
+      String partitionName,
+      boolean shouldLoadInMemory) {
     throw new HoodieMetadataException("Unsupported operation: getRecordsByKeyPrefixes!");
   }
 
@@ -123,7 +141,7 @@ class NoOpTableMetadata implements HoodieTableMetadata {
 
   @Override
   public Option<String> getLatestCompactionTime() {
-    throw new HoodieMetadataException("Unsupported operation: readRecordIndex!");
+    throw new HoodieMetadataException("Unsupported operation: getLatestCompactionTime!");
   }
 
   @Override
@@ -133,12 +151,17 @@ class NoOpTableMetadata implements HoodieTableMetadata {
 
   @Override
   public int getNumFileGroupsForPartition(MetadataPartitionType partition) {
-    throw new HoodieMetadataException("Unsupported operation: readRecordIndex!");
+    throw new HoodieMetadataException("Unsupported operation: getNumFileGroupsForPartition!");
+  }
+
+  @Override
+  public Map<String, List<FileSlice>> getBucketizedFileGroupsForPartitionedRLI(MetadataPartitionType partition) {
+    throw new HoodieMetadataException("Unsupported operation: getFileGroupsFromPartition!");
   }
 
   @Override
   public Map<Pair<String, StoragePath>, List<StoragePathInfo>> listPartitions(List<Pair<String, StoragePath>> partitionPathList) throws IOException {
-    throw new HoodieMetadataException("Unsupported operation: readRecordIndex!");
+    throw new HoodieMetadataException("Unsupported operation: listPartitions!");
   }
 
   @Override

@@ -24,6 +24,8 @@ import org.apache.hudi.common.model.{FileSlice, HoodieLogFile, OverwriteWithLate
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.storage.StoragePath
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.mapred.JobConf
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.catalyst.InternalRow
@@ -40,10 +42,9 @@ case class HoodieMergeOnReadFileSplit(dataFile: Option[PartitionedFile],
 case class MergeOnReadSnapshotRelation(override val sqlContext: SQLContext,
                                        override val optParams: Map[String, String],
                                        override val metaClient: HoodieTableMetaClient,
-                                       private val globPaths: Seq[StoragePath],
                                        private val userSchema: Option[StructType],
                                        private val prunedDataSchema: Option[StructType] = None)
-  extends BaseMergeOnReadSnapshotRelation(sqlContext, optParams, metaClient, globPaths, userSchema, prunedDataSchema) {
+  extends BaseMergeOnReadSnapshotRelation(sqlContext, optParams, metaClient, userSchema, prunedDataSchema) {
 
   override type Relation = MergeOnReadSnapshotRelation
 
@@ -66,7 +67,6 @@ case class MergeOnReadSnapshotRelation(override val sqlContext: SQLContext,
 abstract class BaseMergeOnReadSnapshotRelation(sqlContext: SQLContext,
                                                optParams: Map[String, String],
                                                metaClient: HoodieTableMetaClient,
-                                               globPaths: Seq[StoragePath],
                                                userSchema: Option[StructType],
                                                prunedDataSchema: Option[StructType])
   extends HoodieBaseRelation(sqlContext, metaClient, optParams, userSchema, prunedDataSchema) {
@@ -90,7 +90,7 @@ abstract class BaseMergeOnReadSnapshotRelation(sqlContext: SQLContext,
    *       by the query), therefore saving on throughput
    */
   protected lazy val mandatoryFieldsForMerging: Seq[String] =
-    Seq(recordKeyField) ++ preCombineFieldOpt.map(Seq(_)).getOrElse(Seq())
+    Seq(recordKeyField) ++ orderingFields
 
   override lazy val mandatoryFields: Seq[String] = mandatoryFieldsForMerging
 
@@ -111,29 +111,28 @@ abstract class BaseMergeOnReadSnapshotRelation(sqlContext: SQLContext,
     val requiredFilters = Seq.empty
     val optionalFilters = filters
     val readers = createBaseFileReaders(tableSchema, requiredSchema, requestedColumns, requiredFilters, optionalFilters)
+    val confWithSchema = embedInternalSchema(new Configuration(conf), internalSchemaOpt)
 
     new HoodieMergeOnReadRDDV2(
       sqlContext.sparkContext,
-      config = jobConf,
+      config = new JobConf(confWithSchema),
+      sqlConf = sqlContext.sparkSession.sessionState.conf,
       fileReaders = readers,
       tableSchema = tableSchema,
       requiredSchema = requiredSchema,
       tableState = tableState,
       mergeType = mergeType,
-      fileSplits = fileSplits)
+      fileSplits = fileSplits,
+      optionalFilters = optionalFilters,
+      metaClient = metaClient,
+      options = optParams)
   }
 
   protected override def collectFileSplits(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): List[HoodieMergeOnReadFileSplit] = {
     val convertedPartitionFilters =
       HoodieFileIndex.convertFilterForTimestampKeyGenerator(metaClient, partitionFilters)
-
-    if (globPaths.isEmpty) {
-      val fileSlices = fileIndex.filterFileSlices(dataFilters, convertedPartitionFilters).flatMap(s => s._2)
-      buildSplits(fileSlices)
-    } else {
-      val fileSlices = listLatestFileSlices(globPaths, partitionFilters, dataFilters)
-      buildSplits(fileSlices)
-    }
+    val fileSlices = fileIndex.filterFileSlices(dataFilters, convertedPartitionFilters).flatMap(s => s._2)
+    buildSplits(fileSlices)
   }
 
   protected def buildSplits(fileSlices: Seq[FileSlice]): List[HoodieMergeOnReadFileSplit] = {
@@ -143,7 +142,7 @@ abstract class BaseMergeOnReadSnapshotRelation(sqlContext: SQLContext,
 
       val partitionedBaseFile = baseFile.map { file =>
         createPartitionedFile(
-          getPartitionColumnsAsInternalRow(file.getPathInfo), file.getPathInfo.getPath, 0, file.getFileLen)
+          getPartitionColumnsAsInternalRow(file.getPathInfo), file.getPathInfo.getPath, 0, file.getFileSize)
       }
 
       HoodieMergeOnReadFileSplit(partitionedBaseFile, logFiles)
