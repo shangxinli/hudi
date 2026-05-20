@@ -20,11 +20,14 @@
 package org.apache.hudi.client.timeline;
 
 import org.apache.hudi.client.timeline.versioning.v1.TimelineArchiverV1;
+import org.apache.hudi.avro.model.HoodieRollbackMetadata;
+import org.apache.hudi.avro.model.HoodieRollbackPartitionMetadata;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.timeline.versioning.v1.ActiveTimelineV1;
+import org.apache.hudi.common.testutils.FileCreateUtils;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
 import org.apache.hudi.common.testutils.InProcessTimeGenerator;
 import org.apache.hudi.common.util.Option;
@@ -38,7 +41,10 @@ import org.apache.hudi.testutils.HoodieWriteableTestTable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 
 import static org.apache.hudi.common.testutils.SchemaTestUtil.getSchemaFromResource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -107,5 +113,69 @@ class TestHoodieTimelineArchiver extends HoodieCommonTestHarness {
     when(hoodieTable.getCompletedSavepointTimeline()).thenReturn(metaClient.getActiveTimeline().getSavePointTimeline().filterCompletedInstants());
     when(hoodieTable.getSavepointTimestamps()).thenReturn(Collections.emptySet());
     return hoodieTable;
+  }
+
+  @Test
+  void rollbackOrphanGuard_lightMode_preservesAllRollbacksWithOrphans() throws Exception {
+    long archivedUnderGuardLight = runOrphanGuardScenario("LIGHT");
+    assertEquals(0L, archivedUnderGuardLight,
+        "No rollback should be archived when LIGHT detects orphans on every one of them");
+  }
+
+  @Test
+  void rollbackOrphanGuard_offMode_archivesRollbacksAsBefore() throws Exception {
+    long archivedUnderGuardOff = runOrphanGuardScenario("OFF");
+    assertEquals(true, archivedUnderGuardOff > 0,
+        "With guard=OFF, archive must drop rollbacks per the existing count threshold");
+  }
+
+  /**
+   * Sets up 5 commits and 4 completed rollback instants (each with non-empty failedDeleteFiles),
+   * runs archive once, and returns how many rollback instants were removed from the active
+   * timeline. Used to verify the guard's behavioral effect end-to-end.
+   */
+  private long runOrphanGuardScenario(String guardMode) throws Exception {
+    TypedProperties advanceProperties = new TypedProperties();
+    advanceProperties.put(TimelineArchiverV1.ARCHIVE_LIMIT_INSTANTS, 10L);
+    HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder()
+        .withPath(tempDir.toString())
+        .withArchivalConfig(HoodieArchivalConfig.newBuilder()
+            .archiveCommitsWith(2, 3)
+            .withRollbackOrphanGuardMode(guardMode)
+            .build())
+        .withMarkersType("DIRECT")
+        .withProperties(advanceProperties)
+        .build();
+    HoodieEngineContext context = new HoodieLocalEngineContext(metaClient.getStorageConf());
+    HoodieStorage hoodieStorage = HoodieStorageUtils.getStorage(basePath, metaClient.getStorageConf());
+    HoodieWriteableTestTable testTable =
+        new HoodieWriteableTestTable(basePath, hoodieStorage, metaClient, SCHEMA, null, null, Option.of(context));
+    for (int i = 0; i < 5; i++) {
+      testTable.addCommit(InProcessTimeGenerator.createNewInstantTime());
+    }
+    for (int i = 0; i < 4; i++) {
+      String rb = InProcessTimeGenerator.createNewInstantTime();
+      HoodieRollbackPartitionMetadata pm = HoodieRollbackPartitionMetadata.newBuilder()
+          .setPartitionPath("2026/01/01")
+          .setSuccessDeleteFiles(Collections.emptyList())
+          .setFailedDeleteFiles(new ArrayList<>(Arrays.asList("fid_tok_20260101000000000.parquet")))
+          .build();
+      HashMap<String, HoodieRollbackPartitionMetadata> pmMap = new HashMap<>();
+      pmMap.put("2026/01/01", pm);
+      HoodieRollbackMetadata meta = HoodieRollbackMetadata.newBuilder()
+          .setStartRollbackTime(rb).setTimeTakenInMillis(0L).setTotalFilesDeleted(0)
+          .setCommitsRollback(Collections.singletonList("20260101000000000"))
+          .setPartitionMetadata(pmMap).build();
+      FileCreateUtils.createRollbackFile(metaClient, rb, meta, false);
+    }
+    testTable.addCommit(InProcessTimeGenerator.createNewInstantTime());
+
+    long rollbacksBefore = metaClient.reloadActiveTimeline().getInstantsAsStream()
+        .filter(i -> "rollback".equals(i.getAction())).count();
+    HoodieTable hoodieTable = setupMockHoodieTable(context, writeConfig);
+    new TimelineArchiverV1<>(writeConfig, hoodieTable).archiveIfRequired(context);
+    long rollbacksAfter = metaClient.reloadActiveTimeline().getInstantsAsStream()
+        .filter(i -> "rollback".equals(i.getAction())).count();
+    return rollbacksBefore - rollbacksAfter;
   }
 }

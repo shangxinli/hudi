@@ -59,6 +59,7 @@ import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.compact.CompactionTriggerStrategy;
+import org.apache.hudi.table.action.rollback.RollbackOrphanDetector;
 import org.apache.hudi.table.marker.WriteMarkers;
 import org.apache.hudi.table.marker.WriteMarkersFactory;
 
@@ -100,6 +101,7 @@ public class TimelineArchiverV1<T extends HoodieAvroPayload, I, K, O> implements
   private final HoodieTableMetaClient metaClient;
   private final TransactionManager txnManager;
   private final Map<String, Long> metrics;
+  private final RollbackOrphanDetector rollbackOrphanDetector = new RollbackOrphanDetector();
 
   public TimelineArchiverV1(HoodieWriteConfig config, HoodieTable<T, I, K, O> table) {
     this.config = config;
@@ -212,7 +214,36 @@ public class TimelineArchiverV1<T extends HoodieAvroPayload, I, K, O> implements
           } else {
             return new ArrayList<HoodieInstant>();
           }
-        }).flatMap(Collection::stream);
+        }).flatMap(Collection::stream)
+        .filter(this::isInstantArchivableUnderOrphanGuard);
+  }
+
+  /**
+   * Defers archival of a rollback instant if its orphan files are still on storage.
+   * Controlled by {@code hoodie.archive.rollback.orphan.guard.mode}; when OFF this is a no-op.
+   * Clean instants always pass through — see issue #18783 for the rollback-specific rationale.
+   */
+  private boolean isInstantArchivableUnderOrphanGuard(HoodieInstant instant) {
+    RollbackOrphanDetector.Mode mode =
+        RollbackOrphanDetector.Mode.parse(config.getRollbackOrphanGuardMode());
+    if (mode == RollbackOrphanDetector.Mode.OFF
+        || !HoodieTimeline.ROLLBACK_ACTION.equals(instant.getAction())) {
+      return true;
+    }
+    try {
+      if (rollbackOrphanDetector.hasOrphans(table, instant, mode)) {
+        log.warn("Deferring archival of rollback instant {} — orphan files detected on storage. "
+            + "Re-run rollback or repair before this instant can be archived.", instant);
+        metrics.merge("archive.rollback.deferred.count", 1L, Long::sum);
+        return false;
+      }
+    } catch (IOException e) {
+      log.warn("Failed to evaluate orphan guard for rollback instant {} — deferring archival "
+          + "for safety; investigate the read failure.", instant, e);
+      metrics.merge("archive.rollback.deferred.count", 1L, Long::sum);
+      return false;
+    }
+    return true;
   }
 
   private Stream<HoodieInstant> getCommitInstantsToArchive() throws IOException {
