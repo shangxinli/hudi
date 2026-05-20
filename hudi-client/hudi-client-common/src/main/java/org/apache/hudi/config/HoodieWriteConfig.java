@@ -300,6 +300,18 @@ public class HoodieWriteConfig extends HoodieConfig {
       .withDocumentation("Enables a more efficient mechanism for rollbacks based on the marker files generated "
           + "during the writes. Turned on by default.");
 
+  public static final ConfigProperty<Boolean> RETAIN_ROLLBACK_MARKERS_UNTIL_ARCHIVE = ConfigProperty
+      .key("hoodie.rollback.retain.markers.until.archive")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("1.3.0")
+      .withDocumentation("When true, markers under .hoodie/.temp/<targetInstant>/ are NOT deleted at the end "
+          + "of a rollback. Instead, they are retained until the rollback instant itself is archived. "
+          + "This gives the archive-time orphan guard (see "
+          + "hoodie.archive.rollback.orphan.guard.mode) an authoritative file list to verify against, "
+          + "covering files that land on storage AFTER rollback completes (for example, a blocked storage "
+          + "close() returning late). Default off; turn on together with the orphan guard.");
+
   public static final ConfigProperty<String> ROLLBACK_AVOID_DUPLICATE_PLAN = ConfigProperty
       .key("hoodie.rollback.avoid.duplicate.plan")
       .defaultValue("false")
@@ -1608,6 +1620,10 @@ public class HoodieWriteConfig extends HoodieConfig {
 
   public boolean shouldRollbackUsingMarkers() {
     return getBoolean(ROLLBACK_USING_MARKERS_ENABLE);
+  }
+
+  public boolean shouldRetainRollbackMarkersUntilArchive() {
+    return getBoolean(RETAIN_ROLLBACK_MARKERS_UNTIL_ARCHIVE);
   }
 
   public boolean shouldAvoidDuplicateRollbackPlan() {

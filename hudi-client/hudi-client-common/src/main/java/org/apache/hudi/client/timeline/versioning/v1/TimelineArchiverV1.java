@@ -21,6 +21,7 @@ package org.apache.hudi.client.timeline.versioning.v1;
 
 import org.apache.hudi.avro.model.HoodieArchivedMetaEntry;
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
+import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.client.timeline.HoodieTimelineArchiver;
 import org.apache.hudi.client.transaction.TransactionManager;
 import org.apache.hudi.client.utils.ArchivalMetrics;
@@ -488,6 +489,43 @@ public class TimelineArchiverV1<T extends HoodieAvroPayload, I, K, O> implements
     if (writeMarkers.deleteMarkerDir(context, config.getMarkersDeleteParallelism())) {
       log.info("Cleaned up left over marker directory for instant :" + instant);
     }
+    // If marker retention until archive is enabled and this is a rollback instant, also clean up
+    // markers retained for the rollback's target instant — they served their purpose at this
+    // point because the rollback record itself is being archived.
+    if (config.shouldRetainRollbackMarkersUntilArchive()
+        && HoodieTimeline.ROLLBACK_ACTION.equals(instant.getAction())
+        && instant.isCompleted()) {
+      try {
+        HoodieRollbackMetadata meta =
+            table.getMetaClient().getActiveTimeline().readRollbackMetadata(instant);
+        for (String target : extractRollbackTargets(meta)) {
+          WriteMarkersFactory.get(config.getMarkersType(), table, target)
+              .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
+        }
+      } catch (IOException e) {
+        log.warn("Failed to clean retained markers for rollback {}; markers may persist. "
+            + "They can be cleaned manually under .hoodie/.temp/.", instant, e);
+      }
+    }
+  }
+
+  /** Returns the union of rolled-back target instant times across legacy and typed fields. */
+  private static java.util.Set<String> extractRollbackTargets(HoodieRollbackMetadata meta) {
+    java.util.Set<String> out = new java.util.HashSet<>();
+    if (meta == null) {
+      return out;
+    }
+    if (meta.getCommitsRollback() != null) {
+      out.addAll(meta.getCommitsRollback());
+    }
+    if (meta.getInstantsRollback() != null) {
+      meta.getInstantsRollback().forEach(info -> {
+        if (info != null && info.getCommitTime() != null) {
+          out.add(info.getCommitTime());
+        }
+      });
+    }
+    return out;
   }
 
   private void writeToFile(Schema wrapperSchema, List<IndexedRecord> records) throws Exception {

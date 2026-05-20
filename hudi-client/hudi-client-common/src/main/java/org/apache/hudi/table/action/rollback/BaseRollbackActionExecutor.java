@@ -122,15 +122,21 @@ public abstract class BaseRollbackActionExecutor<T, I, K, O> extends BaseActionE
         stats);
     finishRollback(inflightInstant, rollbackMetadata);
 
-    // Finally, remove the markers post rollback.
-    WriteMarkersFactory.get(config.getMarkersType(), table, instantToRollback.requestedTime())
-        .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
-    if (table.getMetaClient().getTableConfig().getTableVersion().lesserThan(HoodieTableVersion.EIGHT)
-        && table.getMetaClient().getTableConfig().getTableType() == HoodieTableType.MERGE_ON_READ) {
-      // For MOR table rollbacks in table version 6 and below, rollback command blocks might
-      // generate markers under rollback instant. So, lets clean up the markers if any.
-      WriteMarkersFactory.get(config.getMarkersType(), table, rollbackInstant.requestedTime())
+    // Markers are normally removed post-rollback. When
+    // hoodie.rollback.retain.markers.until.archive is enabled, we keep them so
+    // that the archive-time orphan guard (see issue #18783) has an
+    // authoritative file list to verify against. The retained markers are
+    // cleaned up when the rollback instant itself is archived.
+    if (!config.shouldRetainRollbackMarkersUntilArchive()) {
+      WriteMarkersFactory.get(config.getMarkersType(), table, instantToRollback.requestedTime())
           .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
+      if (table.getMetaClient().getTableConfig().getTableVersion().lesserThan(HoodieTableVersion.EIGHT)
+          && table.getMetaClient().getTableConfig().getTableType() == HoodieTableType.MERGE_ON_READ) {
+        // For MOR table rollbacks in table version 6 and below, rollback command blocks might
+        // generate markers under rollback instant. So, lets clean up the markers if any.
+        WriteMarkersFactory.get(config.getMarkersType(), table, rollbackInstant.requestedTime())
+            .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
+      }
     }
 
     return rollbackMetadata;
