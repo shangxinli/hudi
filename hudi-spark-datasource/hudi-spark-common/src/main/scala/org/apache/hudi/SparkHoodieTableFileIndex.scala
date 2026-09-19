@@ -441,7 +441,13 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
         // prefix to try to reduce the scope of the required file-listing
         val relativePartitionPathPrefix = composeRelativePartitionPath(staticPartitionColumnNameValuePairs)
 
-        if (!metaClient.getStorage.exists(new StoragePath(getBasePath, relativePartitionPathPrefix))) {
+        // A missing directory under the base path normally means the partition does not exist. That
+        // inference does not hold once the table has partitions whose files were registered where they
+        // already live: those partitions are real, are listed in the metadata table, and have no
+        // directory of their own here. Skip the shortcut for such tables and let the listing decide.
+        val canInferAbsenceFromStorage = !metaClient.getTableConfig.hasRegisterOnlyPartitions
+        if (canInferAbsenceFromStorage
+          && !metaClient.getStorage.exists(new StoragePath(getBasePath, relativePartitionPathPrefix))) {
           Seq()
         } else if (staticPartitionColumnNameValuePairs.length == partitionColumnNames.length) {
           // In case composed partition path is complete, we can return it directly avoiding extra listing operation
