@@ -40,6 +40,9 @@ import java.util.List;
  * They are recorded using the external-file convention from {@link ExternalFilePathUtil}: the stat path carries a
  * {@code _<commitTime>_hudiext} marker, and the file group id is the file's own name, assigned once here at
  * registration. The read path strips the marker to recover the real path.
+ *
+ * <p>Each stat also records the source base path the file lives under, since the file is never copied into the
+ * table. The metadata table resolves the entry against that path rather than against the table base path.
  */
 @Slf4j
 public class RegisterOnlyBootstrapStatBuilder {
@@ -69,13 +72,17 @@ public class RegisterOnlyBootstrapStatBuilder {
   }
 
   private static HoodieWriteStat buildStat(String partitionPath, HoodieFileStatus fileStatus, String commitTime) {
-    String fileName = new StoragePath(fileStatus.getPath().getUri()).getName();
+    StoragePath sourcePath = new StoragePath(fileStatus.getPath().getUri());
+    String fileName = sourcePath.getName();
     long fileSize = fileStatus.getLength();
 
     HoodieWriteStat stat = new HoodieWriteStat();
     stat.setFileId(fileName);
     stat.setPartitionPath(partitionPath);
     stat.setPath(markedPathInTable(partitionPath, fileName, commitTime));
+    // The file is never copied or rewritten, so the table records where it already lives. Without this the
+    // metadata table would resolve the entry under the table base path, where nothing exists.
+    stat.setSourceBasePath(sourcePath.getParent().toString());
     stat.setFileSizeInBytes(fileSize);
     stat.setTotalWriteBytes(fileSize);
     // Record counts are deliberately left at zero: establishing them would mean reading the file, which is

@@ -62,6 +62,27 @@ public class TestRegisterOnlyBootstrapStatBuilder {
   }
 
   @Test
+  public void testStatRecordsWhereTheSourceFileActuallyLives() {
+    List<HoodieWriteStat> stats = RegisterOnlyBootstrapStatBuilder.buildStats(
+        Collections.singletonList(Pair.of("datestr=2022-06-15",
+            Collections.singletonList(fileStatus("/src/table/datestr=2022-06-15/part-0.parquet", 4096L)))),
+        COMMIT_TIME);
+
+    assertEquals("/src/table/datestr=2022-06-15", stats.get(0).getSourceBasePath());
+  }
+
+  @Test
+  public void testSourceBasePathFollowsTheFileNotThePartitionName() {
+    // The source layout need not mirror the Hudi partition path; the stat points at the real directory.
+    List<HoodieWriteStat> stats = RegisterOnlyBootstrapStatBuilder.buildStats(
+        Collections.singletonList(Pair.of("datestr=2022-06-15",
+            Collections.singletonList(fileStatus("/archive/y=2022/m=06/d=15/part-0.parquet", 4096L)))),
+        COMMIT_TIME);
+
+    assertEquals("/archive/y=2022/m=06/d=15", stats.get(0).getSourceBasePath());
+  }
+
+  @Test
   public void testMarkedPathResolvesBackToTheRealFile() {
     HoodieWriteStat stat = RegisterOnlyBootstrapStatBuilder.buildStats(
         Collections.singletonList(Pair.of("datestr=2022-06-15",
