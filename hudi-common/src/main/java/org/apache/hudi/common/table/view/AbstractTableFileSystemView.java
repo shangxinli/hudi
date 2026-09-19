@@ -181,6 +181,17 @@ public abstract class AbstractTableFileSystemView implements SyncableFileSystemV
               fileStatus.getPath().getParent(), fileName);
           return FSUtils.getRelativePartitionPath(metaClient.getBasePath(), parent);
         }));
+    return addFilesToView(statusesByPartitionPath);
+  }
+
+  /**
+   * Adds the provided statuses into the file system view, given the partition each of them belongs to.
+   *
+   * <p>Prefer this over {@link #addFilesToView(List)} where the caller knows the partitioning: a file
+   * registered into the table without being rewritten lives under its own source base path, so its
+   * parent directory cannot be used to recover the partition it belongs to.
+   */
+  public List<HoodieFileGroup> addFilesToView(Map<String, List<StoragePathInfo>> statusesByPartitionPath) {
     return statusesByPartitionPath.entrySet().stream().map(entry -> addFilesToView(entry.getKey(), entry.getValue()))
         .flatMap(List::stream).collect(Collectors.toList());
   }

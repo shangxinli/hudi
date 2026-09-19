@@ -73,14 +73,15 @@ public class BaseHoodieTableFileIndexTest {
     StoragePathInfo file = new StoragePathInfo(
         new StoragePath(basePath, "dt=2026-01-01/file-0_0-0-0_20260101000000001.parquet"),
         100L, false, (short) 1, 1024L, 0L);
-    List<StoragePathInfo> allFiles = Collections.singletonList(file);
+    Map<String, List<StoragePathInfo>> filesByPartition =
+        Collections.singletonMap("dt=2026-01-01", Collections.singletonList(file));
 
     Method generateMethod = BaseHoodieTableFileIndex.class.getDeclaredMethod(
-        "generatePartitionFileSlicesPostROTablePathFilter", List.class, List.class);
+        "generatePartitionFileSlicesPostROTablePathFilter", List.class, Map.class);
     generateMethod.setAccessible(true);
     @SuppressWarnings("unchecked")
     Map<PartitionPath, List<FileSlice>> result =
-        (Map<PartitionPath, List<FileSlice>>) generateMethod.invoke(fileIndex, partitions, allFiles);
+        (Map<PartitionPath, List<FileSlice>>) generateMethod.invoke(fileIndex, partitions, filesByPartition);
 
     assertNotNull(result, "Result map must not be null");
     assertEquals(3, result.size(),

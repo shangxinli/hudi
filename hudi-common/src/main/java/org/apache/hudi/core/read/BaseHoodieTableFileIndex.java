@@ -281,7 +281,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     validate(activeTimeline, queryInstant);
 
     HoodieTimer timer = HoodieTimer.start();
-    List<StoragePathInfo> allFiles = listPartitionPathFiles(partitions, activeTimeline);
+    Map<String, List<StoragePathInfo>> filesByPartition = listPartitionPathFiles(partitions, activeTimeline);
     long elapsedMs = timer.endTimer();
     log.info("[table={}] HoodieFileIndex.listPartitionPathFiles took {} ms ({} partitions, queryInstant={})",
         tableName, elapsedMs, partitions.size(),
@@ -293,9 +293,9 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
         && !shouldIncludePendingCommits
         && (metaClient.getTableConfig().getTableType() == HoodieTableType.COPY_ON_WRITE
             || queryType == HoodieTableQueryType.READ_OPTIMIZED)) {
-      return generatePartitionFileSlicesPostROTablePathFilter(partitions, allFiles);
+      return generatePartitionFileSlicesPostROTablePathFilter(partitions, filesByPartition);
     }
-    return filterFiles(partitions, activeTimeline, allFiles, queryInstant);
+    return filterFiles(partitions, activeTimeline, filesByPartition, queryInstant);
   }
 
   /**
@@ -308,8 +308,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
    * @return Map of PartitionPath to list of FileSlices
    */
   private Map<PartitionPath, List<FileSlice>> generatePartitionFileSlicesPostROTablePathFilter(
-      List<PartitionPath> partitions, List<StoragePathInfo> allFiles) {
-    // Group files by partition path, then by file group ID
+      List<PartitionPath> partitions, Map<String, List<StoragePathInfo>> filesByPartition) {
     Map<String, PartitionPath> partitionsMap = new HashMap<>();
     partitions.forEach(p -> partitionsMap.put(p.path, p));
     Map<PartitionPath, List<FileSlice>> partitionToFileSlices = new HashMap<>();
@@ -319,37 +318,31 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     // already honored by filterFiles, which iterates over partitions rather than over files.
     partitions.forEach(p -> partitionToFileSlices.put(p, Collections.emptyList()));
 
-    for (StoragePathInfo pathInfo : allFiles) {
-      // Create FileSlice obj from StoragePathInfo.
-      String relPartitionPath = FSUtils.getRelativePartitionPath(basePath, pathInfo.getPath().getParent());
-      HoodieBaseFile baseFile = new HoodieBaseFile(pathInfo);
-      // Use relative partition path for FileSlice - consistent with HoodieTableFileSystemView
-      FileSlice fileSlice = new FileSlice(relPartitionPath, baseFile.getCommitTime(), baseFile.getFileId());
-      fileSlice.setBaseFile(baseFile);
-
-      // Add the FileSlice to partitionToFileSlices
+    filesByPartition.forEach((relPartitionPath, files) -> {
       PartitionPath partitionPathObj = partitionsMap.get(relPartitionPath);
-      if (partitionPathObj != null) {
-        List<FileSlice> fileSlices = partitionToFileSlices.get(partitionPathObj);
-        if (fileSlices.isEmpty()) {
-          fileSlices = new ArrayList<>();
-          partitionToFileSlices.put(partitionPathObj, fileSlices);
-        }
-        fileSlices.add(fileSlice);
-      } else {
-        log.warn("Could not find partition path object for relative path: {}. Skipping file: {}",
-            relPartitionPath, pathInfo.getPath());
+      if (partitionPathObj == null) {
+        log.warn("Could not find partition path object for relative path: {}. Skipping its {} files.",
+            relPartitionPath, files.size());
+        return;
       }
-    }
+      List<FileSlice> fileSlices = new ArrayList<>(files.size());
+      for (StoragePathInfo pathInfo : files) {
+        HoodieBaseFile baseFile = new HoodieBaseFile(pathInfo);
+        FileSlice fileSlice = new FileSlice(relPartitionPath, baseFile.getCommitTime(), baseFile.getFileId());
+        fileSlice.setBaseFile(baseFile);
+        fileSlices.add(fileSlice);
+      }
+      partitionToFileSlices.put(partitionPathObj, fileSlices);
+    });
     return partitionToFileSlices;
   }
 
   private Map<PartitionPath, List<FileSlice>> filterFiles(List<PartitionPath> partitions,
                                                                             HoodieTimeline activeTimeline,
-                                                                            List<StoragePathInfo> allFiles,
+                                                                            Map<String, List<StoragePathInfo>> filesByPartition,
                                                                             Option<String> queryInstant) {
     HoodieTimer timer = HoodieTimer.start();
-    try (HoodieTableFileSystemView fileSystemView = new HoodieTableFileSystemView(metaClient, activeTimeline, allFiles)) {
+    try (HoodieTableFileSystemView fileSystemView = new HoodieTableFileSystemView(metaClient, activeTimeline, filesByPartition)) {
       // NOTE: For MOR table, when the compaction is inflight, we need to not only fetch the
       // latest slices, but also include the base and log files of the second-last version of
       // the file slice in the same file group as the latest file slice that is under compaction.
@@ -371,7 +364,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
       long elapsedMs = timer.endTimer();
       log.debug("[table={}] HoodieFileIndex.filterFiles took {} ms ({} partitions, {} files, queryInstant={})",
           tableName, elapsedMs,
-          partitions.size(), allFiles.size(), queryInstant.orElse("N/A"));
+          partitions.size(), filesByPartition.values().stream().mapToInt(List::size).sum(), queryInstant.orElse("N/A"));
     }
   }
 
@@ -482,10 +475,14 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
   }
 
   /**
-   * Load partition paths and it's files under the query table path.
+   * Load partition paths and it's files under the query table path, keyed by relative partition path.
+   *
+   * <p>The partition a file belongs to is kept alongside the listing rather than re-derived from the
+   * file's own path later on: a file registered into the table without being rewritten lives under its
+   * source base path, so its parent directory says nothing about which partition holds it.
    */
-  private List<StoragePathInfo> listPartitionPathFiles(List<PartitionPath> partitions,
-                                                       HoodieTimeline activeTimeline) {
+  private Map<String, List<StoragePathInfo>> listPartitionPathFiles(List<PartitionPath> partitions,
+                                                                    HoodieTimeline activeTimeline) {
     List<StoragePath> partitionPaths = partitions.stream()
         // NOTE: We're using [[createPathUnsafe]] to create Hadoop's [[Path]] objects
         //       instances more efficiently, provided that
@@ -505,9 +502,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
         CollectionUtils.diffSet(partitionPaths, cachedPartitionPaths.keySet());
 
     if (missingPartitionPaths.isEmpty()) {
-      return cachedPartitionPaths.values().stream()
-          .flatMap(Collection::stream)
-          .collect(Collectors.toList());
+      return toRelativePartitionKeyedMap(cachedPartitionPaths);
     }
 
     // NOTE: We're constructing a mapping of absolute form of the partition-path into
@@ -532,11 +527,13 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
         fileStatusCache.put(relativePath, files);
       });
 
-      List<StoragePathInfo> result = new ArrayList<>();
-      result.addAll(cachedPartitionPaths.values().stream()
-          .flatMap(e -> e.stream()).collect(Collectors.toList()));
-      result.addAll(fetchedPartitionsMap.values().stream()
-          .flatMap(e -> e.stream()).collect(Collectors.toList()));
+      Map<String, List<StoragePathInfo>> result = toRelativePartitionKeyedMap(cachedPartitionPaths);
+      fetchedPartitionsMap.forEach((absolutePath, files) ->
+          result.merge(missingPartitionPathsMap.get(absolutePath).toString(), files, (a, b) -> {
+            List<StoragePathInfo> merged = new ArrayList<>(a);
+            merged.addAll(b);
+            return merged;
+          }));
 
       return result;
     } catch (IOException e) {
@@ -546,6 +543,13 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
       log.debug("[table={}] HoodieFileIndex.getAllFilesInPartitions took {} ms ({} uncached partitions)",
           tableName, elapsedMs, missingPartitionPaths.size());
     }
+  }
+
+  private static Map<String, List<StoragePathInfo>> toRelativePartitionKeyedMap(
+      Map<StoragePath, List<StoragePathInfo>> byPartitionPath) {
+    Map<String, List<StoragePathInfo>> result = new HashMap<>(byPartitionPath.size());
+    byPartitionPath.forEach((partitionPath, files) -> result.put(partitionPath.toString(), files));
+    return result;
   }
 
   protected Option<StoragePathFilter> getPartitionPathFilter(HoodieTimeline activeTimeline) {

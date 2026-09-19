@@ -36,7 +36,6 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -51,6 +50,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -58,9 +58,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * registered without their contents ever being read.
  */
 @Tag("functional")
-@Disabled("REGISTER_ONLY cannot currently be bootstrapped: HoodieSparkSqlWriter asserts the bootstrap source and "
-    + "table base paths differ, while a metadata FILES entry can only name a file under the table base path. "
-    + "Blocked on the direction chosen in https://github.com/apache/hudi/issues/18135")
 public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
 
   private static final String DATE_FIELD = "datestr";
@@ -71,7 +68,6 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
 
   private String sourcePath;
   private String targetPath;
-  private String separateTargetPath;
   private String hotDate;
   private String warmDate;
   private String coldDate;
@@ -79,11 +75,8 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
   @BeforeEach
   public void setUp() throws Exception {
     String uuid = UUID.randomUUID().toString();
-    // REGISTER_ONLY registers into the metadata table, which can only address files under the table base path,
-    // so the table is bootstrapped in place over the existing data rather than into a separate target.
-    sourcePath = tmpFolder.toAbsolutePath() + "/" + uuid + "/table";
-    targetPath = sourcePath;
-    separateTargetPath = tmpFolder.toAbsolutePath() + "/" + uuid + "/elsewhere";
+    sourcePath = tmpFolder.toAbsolutePath() + "/" + uuid + "/source";
+    targetPath = tmpFolder.toAbsolutePath() + "/" + uuid + "/table";
     hotDate = LocalDate.now().minusDays(5).format(DATE_FORMAT);
     warmDate = LocalDate.now().minusDays(100).format(DATE_FORMAT);
     coldDate = LocalDate.now().minusDays(900).format(DATE_FORMAT);
@@ -126,9 +119,7 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
     options.put(HoodieBootstrapConfig.BASE_PATH.key(), sourcePath);
     options.put(HoodieBootstrapConfig.MODE_SELECTOR_CLASS_NAME.key(), DateBasedBootstrapModeSelector.class.getName());
     options.put(HoodieBootstrapConfig.DATE_SELECTOR_FULL_RECORD_DAYS.key(), "30");
-    // In place, METADATA_ONLY skeletons would land in the same partition dirs as the source data, so the warm
-    // window is collapsed: everything past the hot window registers rather than building skeletons.
-    options.put(HoodieBootstrapConfig.DATE_SELECTOR_METADATA_ONLY_DAYS.key(), "30");
+    options.put(HoodieBootstrapConfig.DATE_SELECTOR_METADATA_ONLY_DAYS.key(), "365");
     options.put(HoodieBootstrapConfig.DATE_SELECTOR_PARTITION_DATE_FORMAT.key(), "yyyy-MM-dd");
     options.put(HoodieBootstrapConfig.DATE_SELECTOR_PARTITION_DATE_FIELD.key(), DATE_FIELD);
     return options;
@@ -162,10 +153,10 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
     runBootstrap();
     Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath);
 
-    assertEquals(2, df.filter("value <> 'hot' and _hoodie_record_key is null").count(),
+    assertEquals(1, df.filter("value = 'cold' and _hoodie_record_key is null").count(),
         "register-only rows carry no record key");
-    assertEquals(0, df.filter("value = 'hot' and _hoodie_record_key is null").count(),
-        "the rewritten tier keeps its metadata columns");
+    assertEquals(0, df.filter("value <> 'cold' and _hoodie_record_key is null").count(),
+        "the rewritten and skeleton tiers keep their metadata columns");
   }
 
   @Test
@@ -177,12 +168,14 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
   }
 
   @Test
-  public void testBootstrapFailsWhenSourceIsNotTheTableItself() {
-    writeSourceTable();
-    Exception e = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
-        () -> sparkSession.emptyDataFrame().write().format("hudi")
-            .options(bootstrapOptions()).mode(SaveMode.Overwrite).save(separateTargetPath));
-    assertTrue(rootCauseMessage(e).contains("is not the table itself"), rootCauseMessage(e));
+  public void testRegisteredFilesStayInTheSourceTable() {
+    runBootstrap();
+    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder()
+        .setConf(context.getStorageConf().newInstance()).setBasePath(targetPath).build();
+    assertTrue(metaClient.getTableConfig().hasRegisterOnlyPartitions());
+    // Nothing was copied: the cold partition exists only under the source table.
+    assertTrue(new java.io.File(sourcePath + "/" + DATE_FIELD + "=" + coldDate).isDirectory());
+    assertFalse(new java.io.File(targetPath + "/" + DATE_FIELD + "=" + coldDate).isDirectory());
   }
 
   @Test

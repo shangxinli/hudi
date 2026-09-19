@@ -194,6 +194,16 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
   }
 
   /**
+   * Create a file system view, as of the given timeline, with the provided file statuses grouped by the
+   * relative partition path each belongs to.
+   */
+  public HoodieTableFileSystemView(HoodieTableMetaClient metaClient, HoodieTimeline visibleActiveTimeline,
+                                   Map<String, List<StoragePathInfo>> pathInfoByPartition) {
+    this(new NoOpTableMetadata(), metaClient, visibleActiveTimeline);
+    addFilesToView(pathInfoByPartition);
+  }
+
+  /**
    * This method is only used when this object is deserialized in a spark executor.
    *
    * @deprecated
