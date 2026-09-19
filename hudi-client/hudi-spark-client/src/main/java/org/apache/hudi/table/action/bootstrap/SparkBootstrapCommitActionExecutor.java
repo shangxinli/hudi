@@ -25,11 +25,13 @@ import org.apache.hudi.client.bootstrap.BootstrapWriteStatus;
 import org.apache.hudi.client.bootstrap.FullRecordBootstrapDataProvider;
 import org.apache.hudi.client.bootstrap.HoodieBootstrapSchemaProvider;
 import org.apache.hudi.client.bootstrap.HoodieSparkBootstrapSchemaProvider;
+import org.apache.hudi.client.bootstrap.RegisterOnlyBootstrapStatBuilder;
 import org.apache.hudi.client.bootstrap.selector.BootstrapModeSelector;
 import org.apache.hudi.client.bootstrap.translator.BootstrapPartitionPathTranslator;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.client.utils.SparkValidatorUtils;
 import org.apache.hudi.common.bootstrap.index.BootstrapIndex;
+import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.model.BootstrapFileMapping;
@@ -37,6 +39,7 @@ import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
@@ -48,6 +51,7 @@ import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.data.HoodieJavaRDD;
+import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.keygen.KeyGeneratorInterface;
@@ -70,10 +74,12 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.client.bootstrap.BootstrapMode.FULL_RECORD;
 import static org.apache.hudi.client.bootstrap.BootstrapMode.METADATA_ONLY;
+import static org.apache.hudi.client.bootstrap.BootstrapMode.REGISTER_ONLY;
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 import static org.apache.hudi.config.HoodieWriteConfig.WRITE_STATUS_STORAGE_LEVEL_VALUE;
 import static org.apache.hudi.table.action.bootstrap.MetadataBootstrapHandlerFactory.getMetadataHandler;
@@ -120,8 +126,10 @@ public class SparkBootstrapCommitActionExecutor<T>
               + "If you want to re-bootstrap, please rollback bootstrap first !!");
       Map<BootstrapMode, List<Pair<String, List<HoodieFileStatus>>>> partitionSelections = listAndProcessSourcePartitions();
 
-      // First run metadata bootstrap which will auto commit
-      Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> metadataResult = metadataBootstrap(partitionSelections.get(METADATA_ONLY));
+      // First run metadata bootstrap which will auto commit. REGISTER_ONLY partitions ride along in the same
+      // commit: neither mode rewrites data, and sharing the commit keeps the table to a single bootstrap instant.
+      Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> metadataResult =
+          metadataBootstrap(partitionSelections.get(METADATA_ONLY), partitionSelections.get(REGISTER_ONLY));
       // if there are full bootstrap to be performed, perform that too
       Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> fullBootstrapResult = fullBootstrap(partitionSelections.get(FULL_RECORD));
 
@@ -140,9 +148,21 @@ public class SparkBootstrapCommitActionExecutor<T>
    * Perform Metadata Bootstrap.
    * @param partitionFilesList List of partitions and files within that partitions
    */
-  protected Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> metadataBootstrap(List<Pair<String, List<HoodieFileStatus>>> partitionFilesList) {
-    if (null == partitionFilesList || partitionFilesList.isEmpty()) {
+  protected Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> metadataBootstrap(
+      List<Pair<String, List<HoodieFileStatus>>> partitionFilesList,
+      List<Pair<String, List<HoodieFileStatus>>> registerOnlyPartitions) {
+    boolean hasMetadataOnly = null != partitionFilesList && !partitionFilesList.isEmpty();
+    boolean hasRegisterOnly = null != registerOnlyPartitions && !registerOnlyPartitions.isEmpty();
+    if (!hasMetadataOnly && !hasRegisterOnly) {
       return Option.empty();
+    }
+    if (hasRegisterOnly && !config.isMetadataTableEnabled()) {
+      throw new HoodieException(String.format(
+          "%d partitions were selected for REGISTER_ONLY bootstrap, but the metadata table is disabled. That mode "
+              + "records files in the metadata table's FILES partition, so without it those partitions would be "
+              + "invisible to queries. Enable %s, or choose a bootstrap mode selector that does not produce "
+              + "REGISTER_ONLY partitions.",
+          registerOnlyPartitions.size(), HoodieMetadataConfig.ENABLE.key()));
     }
 
     HoodieTableMetaClient metaClient = table.getMetaClient();
@@ -153,16 +173,57 @@ public class SparkBootstrapCommitActionExecutor<T>
     table.getActiveTimeline().transitionRequestedToInflight(instantGenerator.createNewInstant(State.REQUESTED,
         metaClient.getCommitActionType(), bootstrapInstantTime), Option.empty());
 
-    HoodieData<BootstrapWriteStatus> bootstrapWriteStatuses = runMetadataBootstrap(partitionFilesList);
+    HoodieData<WriteStatus> writeStatuses = hasMetadataOnly
+        ? runMetadataBootstrap(partitionFilesList).map(w -> (WriteStatus) w)
+        : context.emptyHoodieData();
+    if (hasRegisterOnly) {
+      writeStatuses = writeStatuses.union(
+          context.parallelize(registerOnlyWriteStatuses(registerOnlyPartitions, bootstrapInstantTime), 1));
+    }
 
     HoodieWriteMetadata<HoodieData<WriteStatus>> result = new HoodieWriteMetadata<>();
-    updateIndexAndCommitIfNeeded(bootstrapWriteStatuses.map(w -> w), result);
+    updateIndexAndCommitIfNeeded(writeStatuses, result);
 
     // Delete the marker directory for the instant
     WriteMarkersFactory.get(config.getMarkersType(), table, bootstrapInstantTime)
         .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
 
+    if (hasRegisterOnly) {
+      markTableAsHavingRegisterOnlyPartitions();
+    }
+
     return Option.of(result);
+  }
+
+  /**
+   * Wraps each REGISTER_ONLY file's stat in a plain {@link WriteStatus}. These are deliberately not
+   * {@link BootstrapWriteStatus}: there is no skeleton file and no source mapping to index, only a file to record
+   * in the metadata table.
+   */
+  private List<WriteStatus> registerOnlyWriteStatuses(
+      List<Pair<String, List<HoodieFileStatus>>> registerOnlyPartitions, String bootstrapInstantTime) {
+    List<HoodieWriteStat> stats =
+        RegisterOnlyBootstrapStatBuilder.buildStats(registerOnlyPartitions, bootstrapInstantTime);
+    log.info("Registering {} files across {} REGISTER_ONLY partitions without reading their contents",
+        stats.size(), registerOnlyPartitions.size());
+    return stats.stream().map(stat -> {
+      WriteStatus writeStatus = new WriteStatus();
+      writeStatus.setFileId(stat.getFileId());
+      writeStatus.setPartitionPath(stat.getPartitionPath());
+      writeStatus.setStat(stat);
+      return writeStatus;
+    }).collect(Collectors.toList());
+  }
+
+  /**
+   * Records on the table that some of its files carry no Hudi metadata columns, so that readers only take the
+   * null-serving path for tables that actually need it.
+   */
+  private void markTableAsHavingRegisterOnlyPartitions() {
+    HoodieTableMetaClient metaClient = table.getMetaClient();
+    Properties props = new Properties();
+    props.setProperty(HoodieTableConfig.BOOTSTRAP_HAS_REGISTER_ONLY_PARTITIONS.key(), "true");
+    HoodieTableConfig.update(metaClient.getStorage(), metaClient.getMetaPath(), props);
   }
 
   private void updateIndexAndCommitIfNeeded(HoodieData<WriteStatus> writeStatuses, HoodieWriteMetadata<HoodieData<WriteStatus>> result) {
@@ -195,8 +256,10 @@ public class SparkBootstrapCommitActionExecutor<T>
   protected void commit(HoodieWriteMetadata<HoodieData<WriteStatus>> result) {
     // Perform bootstrap index write and then commit. Make sure both record-key and bootstrap-index
     // is all done in a single job DAG.
+    List<WriteStatus> allWriteStatuses = result.getWriteStatuses().collectAsList();
     Map<String, List<Pair<BootstrapFileMapping, HoodieWriteStat>>> bootstrapSourceAndStats =
-        result.getWriteStatuses().collectAsList().stream()
+        allWriteStatuses.stream()
+            .filter(w -> w instanceof BootstrapWriteStatus)
             .map(w -> {
               BootstrapWriteStatus ws = (BootstrapWriteStatus) w;
               return Pair.of(ws.getBootstrapSourceFileMapping(), ws.getStat());
@@ -211,8 +274,7 @@ public class SparkBootstrapCommitActionExecutor<T>
       indexWriter.finish();
       log.info("Finished writing bootstrap index for source {} in table {}", config.getBootstrapSourceBasePath(), config.getBasePath());
     }
-    commit(result, bootstrapSourceAndStats.values().stream()
-        .flatMap(f -> f.stream().map(Pair::getValue)).collect(Collectors.toList()));
+    commit(result, allWriteStatuses.stream().map(WriteStatus::getStat).collect(Collectors.toList()));
     log.info("Committing metadata bootstrap !!");
   }
 

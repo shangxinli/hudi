@@ -329,6 +329,14 @@ public class HoodieTableConfig extends HoodieConfig {
       .noDefaultValue()
       .withDocumentation("Base path of the dataset that needs to be bootstrapped as a Hudi table");
 
+  public static final ConfigProperty<Boolean> BOOTSTRAP_HAS_REGISTER_ONLY_PARTITIONS = ConfigProperty
+      .key("hoodie.bootstrap.has.register.only.partitions")
+      .defaultValue(false)
+      .sinceVersion("1.1.0")
+      .withDocumentation("Whether this table holds partitions bootstrapped in REGISTER_ONLY mode, whose files were "
+          + "registered without being read and therefore carry no Hudi metadata columns. Readers use this to decide "
+          + "whether the metadata columns may need to be served as null.");
+
   /**
    * @deprecated since 1.3.0, use {@link #META_FIELDS_MODE} instead. {@code true} maps to
    * {@link MetaFieldsMode#ALL} and {@code false} maps to {@link MetaFieldsMode#NONE}. This property
@@ -1171,6 +1179,10 @@ public class HoodieTableConfig extends HoodieConfig {
 
   public Option<String> getBootstrapBasePath() {
     return Option.ofNullable(getString(BOOTSTRAP_BASE_PATH));
+  }
+
+  public boolean hasRegisterOnlyPartitions() {
+    return getBooleanOrDefault(BOOTSTRAP_HAS_REGISTER_ONLY_PARTITIONS);
   }
 
   public Option<HoodieSchema> getTableCreateSchema() {
