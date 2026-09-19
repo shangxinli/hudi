@@ -238,6 +238,25 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
   }
 
   @Test
+  public void testRegisteredFileWithHiveStyleUnderscoreNameIsStillReadable() throws IOException {
+    // Hive writes files named like 000000_0, and FSUtils.getFileId splits a name on its first underscore.
+    // A registered file keeps its original name, so this is the shape most likely to trip the read path.
+    writeSourceTable();
+    java.io.File coldDir = new java.io.File(sourcePath + "/" + DATE_FIELD + "=" + coldDate);
+    java.io.File[] parquetFiles = coldDir.listFiles((dir, name) -> name.endsWith(".parquet"));
+    assertEquals(1, parquetFiles.length);
+    assertTrue(parquetFiles[0].renameTo(new java.io.File(coldDir, "000000_0.parquet")));
+
+    sparkSession.emptyDataFrame().write().format("hudi")
+        .options(bootstrapOptions()).mode(SaveMode.Overwrite).save(targetPath);
+
+    Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath)
+        .filter(DATE_FIELD + " = '" + coldDate + "'");
+    assertEquals(1, df.count());
+    assertEquals("cold-1", df.collectAsList().get(0).getAs("_row_key"));
+  }
+
+  @Test
   public void testBootstrapFailsWhenMetadataTableIsDisabled() {
     writeSourceTable();
     Map<String, String> options = bootstrapOptions();
