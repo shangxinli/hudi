@@ -2820,6 +2820,22 @@ public class HoodieWriteConfig extends HoodieConfig {
     return BootstrapMode.valueOf(getString(HoodieBootstrapConfig.PARTITION_SELECTOR_REGEX_MODE));
   }
 
+  public int getBootstrapDateSelectorFullRecordDays() {
+    return getInt(HoodieBootstrapConfig.DATE_SELECTOR_FULL_RECORD_DAYS);
+  }
+
+  public int getBootstrapDateSelectorMetadataOnlyDays() {
+    return getInt(HoodieBootstrapConfig.DATE_SELECTOR_METADATA_ONLY_DAYS);
+  }
+
+  public String getBootstrapDateSelectorPartitionDateFormat() {
+    return getString(HoodieBootstrapConfig.DATE_SELECTOR_PARTITION_DATE_FORMAT);
+  }
+
+  public String getBootstrapDateSelectorPartitionDateField() {
+    return getString(HoodieBootstrapConfig.DATE_SELECTOR_PARTITION_DATE_FIELD);
+  }
+
   public String getBootstrapPartitionPathTranslatorClass() {
     return getString(HoodieBootstrapConfig.PARTITION_PATH_TRANSLATOR_CLASS_NAME);
   }

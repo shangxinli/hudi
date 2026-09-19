@@ -41,5 +41,14 @@ public enum BootstrapMode {
   @EnumFieldDescription("In this mode, the full record data is not copied into Hudi therefore it avoids full cost of rewriting the dataset. "
       + "Instead, 'skeleton' files containing just the corresponding metadata columns are added to the Hudi table. Hudi relies on the data "
       + "in the original table and will face data-loss or corruption if files in the original table location are deleted or modified.")
-  METADATA_ONLY
+  METADATA_ONLY,
+
+  /**
+   * In this mode, the partition's files are registered in the metadata table without reading their contents.
+   */
+  @EnumFieldDescription("In this mode, neither the data nor record level metadata is read from the source files. The partition's existing files are "
+      + "registered in the metadata table so that queries return their rows, and they are read as plain Parquet with the Hudi metadata columns served "
+      + "as null. Intended for partitions held in cold storage, where reading file contents would trigger an expensive retrieval. Requires the metadata "
+      + "table to be enabled, and the partitions cannot be updated or deleted until they are re-bootstrapped in another mode.")
+  REGISTER_ONLY
 }

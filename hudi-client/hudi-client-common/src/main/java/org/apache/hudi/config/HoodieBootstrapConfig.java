@@ -110,6 +110,37 @@ public class HoodieBootstrapConfig extends HoodieConfig {
       .sinceVersion("0.6.0")
       .withDocumentation("Matches each bootstrap dataset partition against this regex and applies the mode below to it.");
 
+  public static final ConfigProperty<Integer> DATE_SELECTOR_FULL_RECORD_DAYS = ConfigProperty
+      .key("hoodie.bootstrap.mode.selector.days.full_record")
+      .defaultValue(30)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Used by DateBasedBootstrapModeSelector. Partitions whose date is within this many days of the current date are "
+          + "bootstrapped in FULL_RECORD mode.");
+
+  public static final ConfigProperty<Integer> DATE_SELECTOR_METADATA_ONLY_DAYS = ConfigProperty
+      .key("hoodie.bootstrap.mode.selector.days.metadata_only")
+      .defaultValue(365)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Used by DateBasedBootstrapModeSelector. Partitions older than the FULL_RECORD window but within this many days of the "
+          + "current date are bootstrapped in METADATA_ONLY mode. Partitions older than this are bootstrapped in REGISTER_ONLY mode.");
+
+  public static final ConfigProperty<String> DATE_SELECTOR_PARTITION_DATE_FORMAT = ConfigProperty
+      .key("hoodie.bootstrap.mode.selector.partition.date.format")
+      .defaultValue("yyyy-MM-dd")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Used by DateBasedBootstrapModeSelector. Pattern used to parse the date out of a partition path.");
+
+  public static final ConfigProperty<String> DATE_SELECTOR_PARTITION_DATE_FIELD = ConfigProperty
+      .key("hoodie.bootstrap.mode.selector.partition.date.field")
+      .noDefaultValue()
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Used by DateBasedBootstrapModeSelector. Name of the partition field holding the date, as it appears in a "
+          + "Hive style partition path such as datestr=2024-01-15. Required by that selector.");
+
   public static final ConfigProperty<String> INDEX_CLASS_NAME = ConfigProperty
       .key("hoodie.bootstrap.index.class")
       .defaultValue(HFileBootstrapIndex.class.getName())
@@ -240,6 +271,26 @@ public class HoodieBootstrapConfig extends HoodieConfig {
 
     public Builder withBootstrapModeForRegexMatch(BootstrapMode modeForRegexMatch) {
       bootstrapConfig.setValue(PARTITION_SELECTOR_REGEX_MODE, modeForRegexMatch.name());
+      return this;
+    }
+
+    public Builder withBootstrapDateSelectorFullRecordDays(int days) {
+      bootstrapConfig.setValue(DATE_SELECTOR_FULL_RECORD_DAYS, String.valueOf(days));
+      return this;
+    }
+
+    public Builder withBootstrapDateSelectorMetadataOnlyDays(int days) {
+      bootstrapConfig.setValue(DATE_SELECTOR_METADATA_ONLY_DAYS, String.valueOf(days));
+      return this;
+    }
+
+    public Builder withBootstrapDateSelectorPartitionDateFormat(String format) {
+      bootstrapConfig.setValue(DATE_SELECTOR_PARTITION_DATE_FORMAT, format);
+      return this;
+    }
+
+    public Builder withBootstrapDateSelectorPartitionDateField(String field) {
+      bootstrapConfig.setValue(DATE_SELECTOR_PARTITION_DATE_FIELD, field);
       return this;
     }
 
