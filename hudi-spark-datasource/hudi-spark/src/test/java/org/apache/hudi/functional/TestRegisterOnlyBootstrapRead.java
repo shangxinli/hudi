@@ -1,0 +1,207 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.hudi.functional;
+
+import org.apache.hudi.DataSourceWriteOptions;
+import org.apache.hudi.client.bootstrap.selector.DateBasedBootstrapModeSelector;
+import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.table.HoodieTableConfig;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.config.HoodieBootstrapConfig;
+import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.keygen.SimpleKeyGenerator;
+import org.apache.hudi.testutils.HoodieSparkClientTestBase;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * End to end coverage for a table bootstrapped across all three tiers, where the coldest partitions are
+ * registered without their contents ever being read.
+ */
+@Tag("functional")
+@Disabled("REGISTER_ONLY cannot currently be bootstrapped: HoodieSparkSqlWriter asserts the bootstrap source and "
+    + "table base paths differ, while a metadata FILES entry can only name a file under the table base path. "
+    + "Blocked on the direction chosen in https://github.com/apache/hudi/issues/18135")
+public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
+
+  private static final String DATE_FIELD = "datestr";
+  private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+  @TempDir
+  public java.nio.file.Path tmpFolder;
+
+  private String sourcePath;
+  private String targetPath;
+  private String separateTargetPath;
+  private String hotDate;
+  private String warmDate;
+  private String coldDate;
+
+  @BeforeEach
+  public void setUp() throws Exception {
+    String uuid = UUID.randomUUID().toString();
+    // REGISTER_ONLY registers into the metadata table, which can only address files under the table base path,
+    // so the table is bootstrapped in place over the existing data rather than into a separate target.
+    sourcePath = tmpFolder.toAbsolutePath() + "/" + uuid + "/table";
+    targetPath = sourcePath;
+    separateTargetPath = tmpFolder.toAbsolutePath() + "/" + uuid + "/elsewhere";
+    hotDate = LocalDate.now().minusDays(5).format(DATE_FORMAT);
+    warmDate = LocalDate.now().minusDays(100).format(DATE_FORMAT);
+    coldDate = LocalDate.now().minusDays(900).format(DATE_FORMAT);
+    initSparkContexts(this.getClass().getSimpleName() + uuid);
+  }
+
+  @AfterEach
+  public void tearDown() throws IOException {
+    cleanupSparkContexts();
+    cleanupClients();
+  }
+
+  /** Writes a plain Hive style parquet table with one row per tier, carrying no Hudi metadata columns. */
+  private void writeSourceTable() {
+    StructType schema = new StructType()
+        .add("_row_key", DataTypes.StringType, false)
+        .add("value", DataTypes.StringType, false)
+        .add("ts", DataTypes.LongType, false)
+        .add(DATE_FIELD, DataTypes.StringType, false);
+    List<Row> rows = new ArrayList<>();
+    rows.add(RowFactory.create("hot-1", "hot", 1L, hotDate));
+    rows.add(RowFactory.create("warm-1", "warm", 2L, warmDate));
+    rows.add(RowFactory.create("cold-1", "cold", 3L, coldDate));
+    sparkSession.createDataFrame(rows, schema)
+        .write().format("parquet").partitionBy(DATE_FIELD).mode(SaveMode.Overwrite).save(sourcePath);
+  }
+
+  private Map<String, String> bootstrapOptions() {
+    Map<String, String> options = new HashMap<>();
+    options.put(DataSourceWriteOptions.TABLE_TYPE().key(), "COPY_ON_WRITE");
+    options.put(DataSourceWriteOptions.HIVE_STYLE_PARTITIONING().key(), "true");
+    options.put(DataSourceWriteOptions.RECORDKEY_FIELD().key(), "_row_key");
+    options.put(DataSourceWriteOptions.PARTITIONPATH_FIELD().key(), DATE_FIELD);
+    options.put(HoodieWriteConfig.KEYGENERATOR_CLASS_NAME.key(), SimpleKeyGenerator.class.getName());
+    options.put(HoodieWriteConfig.TBL_NAME.key(), "register_only_test");
+    options.put(HoodieTableConfig.ORDERING_FIELDS.key(), "ts");
+    options.put(HoodieMetadataConfig.ENABLE.key(), "true");
+    options.put(HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key(), "false");
+    options.put(DataSourceWriteOptions.OPERATION().key(), DataSourceWriteOptions.BOOTSTRAP_OPERATION_OPT_VAL());
+    options.put(HoodieBootstrapConfig.BASE_PATH.key(), sourcePath);
+    options.put(HoodieBootstrapConfig.MODE_SELECTOR_CLASS_NAME.key(), DateBasedBootstrapModeSelector.class.getName());
+    options.put(HoodieBootstrapConfig.DATE_SELECTOR_FULL_RECORD_DAYS.key(), "30");
+    // In place, METADATA_ONLY skeletons would land in the same partition dirs as the source data, so the warm
+    // window is collapsed: everything past the hot window registers rather than building skeletons.
+    options.put(HoodieBootstrapConfig.DATE_SELECTOR_METADATA_ONLY_DAYS.key(), "30");
+    options.put(HoodieBootstrapConfig.DATE_SELECTOR_PARTITION_DATE_FORMAT.key(), "yyyy-MM-dd");
+    options.put(HoodieBootstrapConfig.DATE_SELECTOR_PARTITION_DATE_FIELD.key(), DATE_FIELD);
+    return options;
+  }
+
+  private void runBootstrap() {
+    writeSourceTable();
+    sparkSession.emptyDataFrame().write().format("hudi")
+        .options(bootstrapOptions()).mode(SaveMode.Overwrite).save(targetPath);
+  }
+
+  @Test
+  public void testSelectStarReturnsRowsFromEveryTier() {
+    runBootstrap();
+    Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath);
+    assertEquals(3, df.count(), "every tier's rows should be visible");
+    assertEquals(1, df.filter("value = 'cold'").count(), "the register-only partition should be queryable");
+  }
+
+  @Test
+  public void testColdPartitionPredicateReturnsItsRows() {
+    runBootstrap();
+    Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath)
+        .filter(DATE_FIELD + " = '" + coldDate + "'");
+    assertEquals(1, df.count());
+    assertEquals("cold-1", df.collectAsList().get(0).getAs("_row_key"));
+  }
+
+  @Test
+  public void testMetaColumnsAreNullOnlyForTheRegisterOnlyTier() {
+    runBootstrap();
+    Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath);
+
+    assertEquals(2, df.filter("value <> 'hot' and _hoodie_record_key is null").count(),
+        "register-only rows carry no record key");
+    assertEquals(0, df.filter("value = 'hot' and _hoodie_record_key is null").count(),
+        "the rewritten tier keeps its metadata columns");
+  }
+
+  @Test
+  public void testTablePropertyRecordsThePresenceOfRegisterOnlyPartitions() {
+    runBootstrap();
+    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder()
+        .setConf(context.getStorageConf().newInstance()).setBasePath(targetPath).build();
+    assertTrue(metaClient.getTableConfig().hasRegisterOnlyPartitions());
+  }
+
+  @Test
+  public void testBootstrapFailsWhenSourceIsNotTheTableItself() {
+    writeSourceTable();
+    Exception e = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+        () -> sparkSession.emptyDataFrame().write().format("hudi")
+            .options(bootstrapOptions()).mode(SaveMode.Overwrite).save(separateTargetPath));
+    assertTrue(rootCauseMessage(e).contains("is not the table itself"), rootCauseMessage(e));
+  }
+
+  @Test
+  public void testBootstrapFailsWhenMetadataTableIsDisabled() {
+    writeSourceTable();
+    Map<String, String> options = bootstrapOptions();
+    options.put(HoodieMetadataConfig.ENABLE.key(), "false");
+    Exception e = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+        () -> sparkSession.emptyDataFrame().write().format("hudi")
+            .options(options).mode(SaveMode.Overwrite).save(targetPath));
+    assertTrue(rootCauseMessage(e).contains("metadata table is disabled"), rootCauseMessage(e));
+  }
+
+  private String rootCauseMessage(Throwable t) {
+    StringBuilder sb = new StringBuilder();
+    while (t != null) {
+      sb.append(t.getMessage()).append(" | ");
+      t = t.getCause();
+    }
+    return sb.toString();
+  }
+}
