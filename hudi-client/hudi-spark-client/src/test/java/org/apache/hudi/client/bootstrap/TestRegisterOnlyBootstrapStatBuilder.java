@@ -111,13 +111,19 @@ public class TestRegisterOnlyBootstrapStatBuilder {
   }
 
   @Test
-  public void testMissingLengthDefaultsToZero() {
+  public void testZeroByteAndUnsizedFilesAreSkipped() {
+    // The metadata table rejects zero byte entries, so they must not reach it.
     HoodieFileStatus noLength = HoodieFileStatus.newBuilder()
-        .setPath(HoodiePath.newBuilder().setUri("/src/t/p/a.parquet").build())
+        .setPath(HoodiePath.newBuilder().setUri("/src/t/p/no-length.parquet").build())
         .build();
-    HoodieWriteStat stat = RegisterOnlyBootstrapStatBuilder.buildStats(
-        Collections.singletonList(Pair.of("p", Collections.singletonList(noLength))), COMMIT_TIME).get(0);
+    List<HoodieWriteStat> stats = RegisterOnlyBootstrapStatBuilder.buildStats(
+        Collections.singletonList(Pair.of("p", Arrays.asList(
+            noLength,
+            fileStatus("/src/t/p/empty.parquet", 0L),
+            fileStatus("/src/t/p/real.parquet", 512L)))),
+        COMMIT_TIME);
 
-    assertEquals(0L, stat.getFileSizeInBytes());
+    assertEquals(1, stats.size());
+    assertEquals("real.parquet", stats.get(0).getFileId());
   }
 }

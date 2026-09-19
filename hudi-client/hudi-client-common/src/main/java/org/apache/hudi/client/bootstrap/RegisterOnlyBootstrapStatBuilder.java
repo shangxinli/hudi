@@ -24,6 +24,8 @@ import org.apache.hudi.common.util.ExternalFilePathUtil;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.storage.StoragePath;
 
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -39,6 +41,7 @@ import java.util.List;
  * {@code _<commitTime>_hudiext} marker, and the file group id is the file's own name, assigned once here at
  * registration. The read path strips the marker to recover the real path.
  */
+@Slf4j
 public class RegisterOnlyBootstrapStatBuilder {
 
   /**
@@ -52,6 +55,13 @@ public class RegisterOnlyBootstrapStatBuilder {
     List<HoodieWriteStat> stats = new ArrayList<>();
     for (Pair<String, List<HoodieFileStatus>> partition : partitions) {
       for (HoodieFileStatus fileStatus : partition.getValue()) {
+        // The metadata table rejects zero byte entries, and such a file holds no rows to lose. Skipping it here
+        // keeps the bootstrap going rather than failing it deep inside the metadata writer.
+        if (fileStatus.getLength() == null || fileStatus.getLength() <= 0) {
+          log.warn("Skipping zero byte file {} in REGISTER_ONLY partition {}",
+              fileStatus.getPath().getUri(), partition.getKey());
+          continue;
+        }
         stats.add(buildStat(partition.getKey(), fileStatus, commitTime));
       }
     }
@@ -60,7 +70,7 @@ public class RegisterOnlyBootstrapStatBuilder {
 
   private static HoodieWriteStat buildStat(String partitionPath, HoodieFileStatus fileStatus, String commitTime) {
     String fileName = new StoragePath(fileStatus.getPath().getUri()).getName();
-    long fileSize = fileStatus.getLength() == null ? 0L : fileStatus.getLength();
+    long fileSize = fileStatus.getLength();
 
     HoodieWriteStat stat = new HoodieWriteStat();
     stat.setFileId(fileName);

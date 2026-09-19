@@ -145,8 +145,10 @@ public class SparkBootstrapCommitActionExecutor<T>
   }
 
   /**
-   * Perform Metadata Bootstrap.
-   * @param partitionFilesList List of partitions and files within that partitions
+   * Perform Metadata Bootstrap, registering any REGISTER_ONLY partitions in the same commit.
+   *
+   * @param partitionFilesList      partitions to bootstrap from their record keys, with the files in each
+   * @param registerOnlyPartitions  partitions whose files are recorded without being read, with the files in each
    */
   protected Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> metadataBootstrap(
       List<Pair<String, List<HoodieFileStatus>>> partitionFilesList,
