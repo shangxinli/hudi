@@ -69,6 +69,9 @@ public abstract class BaseWriteHelper<T, I, K, O, R> extends ParallelismHelper<I
 
       I taggedRecords = dedupedRecords;
       if (table.getIndex().requiresTagging(operationType)) {
+        // Check before tagging, not after: the index would read the target partitions to locate existing
+        // records, and a registered partition has no record keys to find.
+        assertPartitionsWritable(dedupedRecords, table, operationType);
         // perform index loop up to get existing location of records
         context.setJobStatus(this.getClass().getSimpleName(), "Tagging: " + table.getConfig().getTableName());
         taggedRecords = tag(dedupedRecords, context, table);
@@ -86,6 +89,15 @@ public abstract class BaseWriteHelper<T, I, K, O, R> extends ParallelismHelper<I
 
   protected abstract I tag(
       I dedupedRecords, HoodieEngineContext context, HoodieTable<T, I, K, O> table);
+
+  /**
+   * Rejects the write if it would have to merge records into a partition the table cannot index.
+   * Engines that can enumerate the incoming partition paths cheaply override this; the default allows everything.
+   */
+  protected void assertPartitionsWritable(I dedupedRecords, HoodieTable<T, I, K, O> table,
+                                          WriteOperationType operationType) {
+    // no-op by default
+  }
 
   public I combineOnCondition(
       boolean condition, I records, int configuredParallelism, HoodieTable<T, I, K, O> table) {

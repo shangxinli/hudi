@@ -44,6 +44,7 @@ import java.io.IOException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -176,6 +177,64 @@ public class TestRegisterOnlyBootstrapRead extends HoodieSparkClientTestBase {
     // Nothing was copied: the cold partition exists only under the source table.
     assertTrue(new java.io.File(sourcePath + "/" + DATE_FIELD + "=" + coldDate).isDirectory());
     assertFalse(new java.io.File(targetPath + "/" + DATE_FIELD + "=" + coldDate).isDirectory());
+  }
+
+  /** Options for a normal (non-bootstrap) write into the already bootstrapped table. */
+  private Map<String, String> writeOptions(String operation) {
+    Map<String, String> options = new HashMap<>();
+    options.put(DataSourceWriteOptions.TABLE_TYPE().key(), "COPY_ON_WRITE");
+    options.put(DataSourceWriteOptions.HIVE_STYLE_PARTITIONING().key(), "true");
+    options.put(DataSourceWriteOptions.RECORDKEY_FIELD().key(), "_row_key");
+    options.put(DataSourceWriteOptions.PARTITIONPATH_FIELD().key(), DATE_FIELD);
+    options.put(HoodieWriteConfig.KEYGENERATOR_CLASS_NAME.key(), SimpleKeyGenerator.class.getName());
+    options.put(HoodieWriteConfig.TBL_NAME.key(), "register_only_test");
+    options.put(HoodieTableConfig.ORDERING_FIELDS.key(), "ts");
+    options.put(HoodieMetadataConfig.ENABLE.key(), "true");
+    options.put(HoodieMetadataConfig.ENABLE_METADATA_INDEX_COLUMN_STATS.key(), "false");
+    options.put(DataSourceWriteOptions.OPERATION().key(), operation);
+    return options;
+  }
+
+  private void write(String operation, String rowKey, String value, String date) {
+    StructType schema = new StructType()
+        .add("_row_key", DataTypes.StringType, false)
+        .add("value", DataTypes.StringType, false)
+        .add("ts", DataTypes.LongType, false)
+        .add(DATE_FIELD, DataTypes.StringType, false);
+    sparkSession.createDataFrame(Collections.singletonList(RowFactory.create(rowKey, value, 9L, date)), schema)
+        .write().format("hudi").options(writeOptions(operation)).mode(SaveMode.Append).save(targetPath);
+  }
+
+  @Test
+  public void testUpsertIntoARegisterOnlyPartitionFailsFast() {
+    runBootstrap();
+    Exception e = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+        () -> write(DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL(), "cold-1", "changed", coldDate));
+    assertTrue(rootCauseMessage(e).contains("REGISTER_ONLY bootstrap partition"), rootCauseMessage(e));
+  }
+
+  @Test
+  public void testUpsertIntoAnOrdinaryPartitionStillWorks() {
+    runBootstrap();
+    write(DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL(), "hot-1", "changed", hotDate);
+
+    Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath);
+    assertEquals(3, df.count());
+    assertEquals(1, df.filter("value = 'changed'").count());
+  }
+
+  @Test
+  public void testInsertOverwritePromotesARegisterOnlyPartition() {
+    runBootstrap();
+    write(DataSourceWriteOptions.INSERT_OVERWRITE_OPERATION_OPT_VAL(), "cold-2", "restored", coldDate);
+
+    Dataset<Row> df = sparkSession.read().format("hudi").load(targetPath)
+        .filter(DATE_FIELD + " = '" + coldDate + "'");
+    assertEquals(1, df.count());
+    Row row = df.collectAsList().get(0);
+    assertEquals("cold-2", row.getAs("_row_key"));
+    // The partition is now owned by the table, so its rows carry meta columns again.
+    assertEquals("cold-2", row.getAs("_hoodie_record_key"));
   }
 
   @Test

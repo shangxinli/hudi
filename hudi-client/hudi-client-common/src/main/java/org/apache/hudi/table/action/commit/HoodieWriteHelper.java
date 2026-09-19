@@ -19,6 +19,7 @@
 package org.apache.hudi.table.action.commit;
 
 import org.apache.hudi.client.WriteStatus;
+import org.apache.hudi.client.bootstrap.RegisterOnlyPartitionGuard;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
@@ -26,6 +27,7 @@ import org.apache.hudi.common.engine.HoodieReaderContext;
 import org.apache.hudi.common.engine.RecordContext;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.read.BufferedRecordMerger;
 import org.apache.hudi.common.table.read.DeleteContext;
@@ -46,6 +48,17 @@ public class HoodieWriteHelper<T, R> extends BaseWriteHelper<T, HoodieData<Hoodi
 
   public static HoodieWriteHelper newInstance() {
     return WriteHelperHolder.HOODIE_WRITE_HELPER;
+  }
+
+  @Override
+  protected void assertPartitionsWritable(HoodieData<HoodieRecord<T>> dedupedRecords,
+                                          HoodieTable<T, HoodieData<HoodieRecord<T>>, HoodieData<HoodieKey>, HoodieData<WriteStatus>> table,
+                                          WriteOperationType operationType) {
+    if (!RegisterOnlyPartitionGuard.appliesTo(table, operationType)) {
+      return;
+    }
+    RegisterOnlyPartitionGuard.assertWritable(table, operationType,
+        dedupedRecords.map(HoodieRecord::getPartitionPath).distinct().collectAsList());
   }
 
   @Override
